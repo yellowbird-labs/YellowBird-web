@@ -1,1 +1,0 @@
-Yellowbird web frontend. 
