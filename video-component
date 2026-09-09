@@ -1,0 +1,598 @@
+# Video Rendering Component: Code & Design Philosophy
+
+This document contains the full source code, architectural breakdown, and design philosophy of the **Video Player / Video Rendering Component** from the `/home` (Dashboard) page.
+
+---
+
+## 1. Overview & Context
+
+In the `/home` dashboard layout (`app/(dashboard)/dashboard/page.tsx`), the video player is a focal interface element occupying the primary viewport space opposite the leaderboard and above the task manager:
+
+```
++-------------------------------------------------------------+
+| Sidebar (20%) |  Leaderboard (1.9fr)  | Video Player (3.1fr)|
+|               |---------------------------------------------|
+|               |  Todo / Task Section (Full Width Bottom)    |
++-------------------------------------------------------------+
+```
+
+The component is engineered with a **skeuomorphic physical workspace aesthetic**—designed to feel like a high-end, tactile, physical display panel pinned to a desk or board, complete with metallic screws, rugged bezel textures, layered depth shadows, and interactive spring physics.
+
+---
+
+## 2. Design Philosophy & Architectural Principles
+
+### 2.1 Skeuomorphic "Pinned Physical Panel" Metaphor
+- **Tactile Weight & Physicality**: Rather than a flat digital box, the component is styled as a physical module. The perimeter between the outer border and inner screen has a rugged, paper-grain texture (`var(--panel-texture-bg)` and `var(--panel-texture-image)` using SVG fractal noise turbulence).
+- **Bulletin Board Pins / Screws**: Positioned precisely in the top-left and top-right corners, the `Screw` primitives feature a multi-slot head (slots at 0°, 60°, and 120°), radial gradient shading, and subtle drop shadows giving them a levitating, fastened appearance.
+
+### 2.2 Calculated Concentric Geometry
+The panel maintains mathematical concentricity between its outer frame and inner screen:
+- **Outer Radius**: `22px` (`OUTER_RADIUS`)
+- **Gap / Bezel Width**: `14px` (`GAP`)
+- **Inner Radius**: `8px` (`INNER_RADIUS = OUTER_RADIUS - GAP`), ensuring smooth, optically harmonious nested curves.
+- **Pin / Screw Positioning**: `SCREW_INSET = (OUTER_RADIUS - (OUTER_RADIUS - GAP / 2) / √2) - SCREW_SIZE / 2`, placing the screw center directly on the 45° corner arc of the bezel.
+
+### 2.3 Layered 3D Depth & Lighting
+- **Multi-layered Ambient & Drop Shadows (`PANEL_SHADOW`)**:
+  - `0 1px 3px rgba(22,25,37,0.036)` (crisp contact shadow)
+  - `0 14px 40px rgba(112,82,62,0.056)` (diffused warm ambient spread)
+  - `inset 0 1px 0 rgba(255,255,255,0.34)` (top edge specular light highlight)
+- **Inner Screen**: Deep contrast dark inset (`#161925` / `bg-neutral-950`) to frame media content with depth.
+
+### 2.4 Micro-Interactions & Tactile Physics
+- **Hover Lift**: When hovered, the panel elevates subtly (`y: -1`, `rotate: 0.06deg`, `scale: 1.002`) using Framer Motion springs (`stiffness: 380`, `damping: 32`).
+- **Desktop Elastic Drag**: On screens `≥ 1024px`, the panel supports constrained rubber-band dragging (`dragConstraints: { top: -4, left: -4, right: 4, bottom: 4 }`, `dragElastic: 0.08`) with zero-bounce spring release (`SPRING_DRAG_RELEASE`), reinforcing its physical presence.
+
+### 2.5 Minimalist & Non-Intrusive Controls
+- **Floating HUD**: Transparent bottom gradient overlay (`bg-gradient-to-t from-black/40 via-black/10 to-transparent`).
+- **Animated Play/Pause Toggle**: 300ms smooth crossfade and scale transition using `AnimatePresence`.
+- **Interactive Scrubber**: Ultra-thin duration track with a progress bar and a hover-revealed scrubber dot (`scale-0 group-hover:scale-100`).
+- **Auto-Hide Behavior**: Controls automatically fade out after 2.5 seconds of inactivity while playing, and immediately reappear upon mouse movement.
+
+---
+
+## 3. Source Code
+
+### 3.1 Primary Video Player Component (`features/dashboard/components/video-player.tsx`)
+
+```tsx
+'use client';
+
+import { useRef, useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { Play, Pause } from 'lucide-react';
+import {
+  PANEL_SHADOW,
+  OUTER_RADIUS,
+  GAP,
+  INNER_RADIUS,
+  SCREW_SIZE,
+  SCREW_INSET,
+  Screw,
+} from './panel-primitives';
+import { SPRING_DRAG_RELEASE, SPRING_HOVER } from '@/lib/ui-motion';
+import { useMediaQuery } from '@/hooks/use-media-query';
+
+export default function VideoPlayer() {
+  const allowPanelDrag = useMediaQuery('(min-width: 1024px)');
+  const screwInset = SCREW_INSET;
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [showControls, setShowControls] = useState(true);
+  const [videoSrc] = useState<string | null>(null);
+
+  const togglePlay = useCallback(() => {
+    if (!videoRef.current || !videoSrc) return;
+    if (isPlaying) {
+      videoRef.current.pause();
+      setShowControls(true);
+    } else {
+      videoRef.current.play();
+    }
+    setIsPlaying((prev) => !prev);
+  }, [isPlaying, videoSrc]);
+
+  const handleTimeUpdate = () => {
+    if (!videoRef.current) return;
+    setProgress(
+      (videoRef.current.currentTime / videoRef.current.duration) * 100,
+    );
+  };
+
+  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!videoRef.current) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    videoRef.current.currentTime = pct * videoRef.current.duration;
+    setProgress(pct * 100);
+  };
+
+  const scheduleHide = useCallback(() => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setShowControls(false), 2500);
+  }, []);
+
+  const handleMouseMove = () => {
+    setShowControls(true);
+    if (isPlaying) scheduleHide();
+  };
+
+  useEffect(() => {
+    if (isPlaying) {
+      scheduleHide();
+    } else {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    }
+    return () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    };
+  }, [isPlaying, scheduleHide]);
+
+  return (
+    <div className="flex h-full w-full min-h-0 min-w-0 max-w-[100vw] items-start justify-center pl-0 pr-0 pt-1.5 pb-3 sm:pl-2 sm:pr-1 sm:pt-2 sm:pb-4 lg:justify-end lg:pr-0.5">
+      <motion.div
+        className={
+          (allowPanelDrag ? 'app-cursor-drag ' : '') +
+          'relative flex h-[100%] w-full min-h-0 min-w-0 max-h-full shrink-0 flex-col border border-black/[0.035] bg-[color:var(--panel-texture-bg)] bg-[image:var(--panel-texture-image)] bg-[length:340px_340px] ring-1 ring-inset ring-black/[0.035] sm:max-w-[min(100%,90vw)] lg:w-[min(100%,90%)]'
+        }
+        style={{
+          borderRadius: `${OUTER_RADIUS}px`,
+          padding: `${GAP}px`,
+          boxShadow: PANEL_SHADOW,
+        }}
+        whileHover={
+          allowPanelDrag ? { y: -1, rotate: 0.06, scale: 1.002 } : undefined
+        }
+        drag={allowPanelDrag}
+        dragConstraints={
+          allowPanelDrag ? { top: -4, left: -4, right: 4, bottom: 4 } : false
+        }
+        dragElastic={allowPanelDrag ? 0.08 : 0}
+        dragTransition={allowPanelDrag ? SPRING_DRAG_RELEASE : undefined}
+        transition={SPRING_HOVER}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => isPlaying && setShowControls(false)}
+      >
+        <Screw
+          className="absolute"
+          style={{
+            top: screwInset,
+            left: screwInset,
+            width: SCREW_SIZE,
+            height: SCREW_SIZE,
+          }}
+        />
+        <Screw
+          className="absolute"
+          style={{
+            top: screwInset,
+            right: screwInset,
+            width: SCREW_SIZE,
+            height: SCREW_SIZE,
+          }}
+        />
+
+        <div
+          className="relative flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden bg-[#161925]"
+          style={{ borderRadius: `${INNER_RADIUS}px` }}
+        >
+          {videoSrc ? (
+            <video
+              ref={videoRef}
+              src={videoSrc}
+              className="w-full h-full object-contain"
+              onTimeUpdate={handleTimeUpdate}
+              onEnded={() => {
+                setIsPlaying(false);
+                setShowControls(true);
+              }}
+            />
+          ) : (
+            <p className="text-neutral-600 text-xs tracking-wide select-none">
+              drop or upload a video
+            </p>
+          )}
+
+          <AnimatePresence>
+            {showControls && (
+              <motion.div
+                initial={{ y: 6, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{
+                  y: 6,
+                  opacity: 0,
+                  transition: { duration: 0.2, ease: [0.42, 0, 1, 1] },
+                }}
+                transition={{ duration: 0.25, ease: [0, 0, 0.58, 1] }}
+                className="absolute bottom-0 left-0 right-0 flex items-center gap-2.5
+                  px-3 py-2.5 bg-gradient-to-t from-black/40 via-black/10 to-transparent"
+              >
+                <button
+                  onClick={togglePlay}
+                  className="shrink-0 w-7 h-7 flex items-center justify-center rounded-full
+                    cursor-pointer hover:bg-white/10 active:scale-95
+                    transition-all duration-150"
+                >
+                  <AnimatePresence mode="wait" initial={false}>
+                    {isPlaying ? (
+                      <motion.div
+                        key="pause"
+                        initial={{ opacity: 0, scale: 0.85 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.85 }}
+                        transition={{ duration: 0.12, ease: 'easeOut' }}
+                      >
+                        <Pause size={13} className="text-white" />
+                      </motion.div>
+                    ) : (
+                      <motion.div
+                        key="play"
+                        initial={{ opacity: 0, scale: 0.85 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.85 }}
+                        transition={{ duration: 0.12, ease: 'easeOut' }}
+                      >
+                        <Play size={13} className="text-white" />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </button>
+
+                <div
+                  className="flex-1 py-1.5 -my-1.5 cursor-pointer group"
+                  onClick={handleSeek}
+                >
+                  <div className="h-[3px] bg-white/20 rounded-full relative">
+                    <div
+                      className="h-full bg-white/70 rounded-full relative"
+                      style={{ width: `${progress}%` }}
+                    >
+                      <div
+                        className="absolute right-0 top-1/2 -translate-y-1/2 w-2.5 h-2.5
+                          rounded-full bg-white shadow-[0_1px_3px_rgba(17,24,39,0.18)]
+                          scale-0 group-hover:scale-100 transition-transform duration-150"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+```
+
+---
+
+### 3.2 Panel Primitives & Skeuomorphic Pins (`features/dashboard/components/panel-primitives.tsx`)
+
+```tsx
+import type { CSSProperties } from 'react';
+
+export const PANEL_SHADOW = [
+  '0 1px 3px rgba(22,25,37,0.036)',
+  '0 14px 40px rgba(112,82,62,0.056)',
+  'inset 0 1px 0 rgba(255,255,255,0.34)',
+].join(',');
+
+export const OUTER_RADIUS = 22;
+export const GAP = 14;
+export const INNER_RADIUS = OUTER_RADIUS - GAP;
+export const SCREW_SIZE = 12;
+
+const midArcRadius = OUTER_RADIUS - GAP / 2;
+const corner45Inset = OUTER_RADIUS - midArcRadius / Math.SQRT2;
+export const SCREW_INSET = corner45Inset - SCREW_SIZE / 2;
+
+const slotStyle = (rotate: number): CSSProperties => ({
+  position: 'absolute',
+  width: '48%',
+  height: '1.5px',
+  borderRadius: '1px',
+  top: '50%',
+  left: '50%',
+  transform: `translate(-50%, -50%) rotate(${rotate}deg)`,
+  background:
+    'linear-gradient(90deg, transparent 0%, rgba(60,55,48,0.3) 20%, rgba(60,55,48,0.5) 50%, rgba(60,55,48,0.3) 80%, transparent 100%)',
+});
+
+export function Screw({
+  className,
+  style,
+}: {
+  className?: string;
+  style?: CSSProperties;
+}) {
+  return (
+    <div className={`z-10 ${className ?? ''}`} style={style}>
+      <div
+        className="w-full h-full rounded-full relative"
+        style={{
+          background:
+            'radial-gradient(circle at 36% 30%, #e0dbd4 0%, #c4beb6 35%, #a8a29a 65%, #938d86 100%)',
+          boxShadow: [
+            '0 1.5px 5px rgba(17,24,39,0.16)',
+            '0 0 0 0.5px rgba(0,0,0,0.1)',
+            'inset 0 2px 1.5px rgba(255,255,255,0.3)',
+            'inset 0 -1.5px 1.5px rgba(0,0,0,0.08)',
+          ].join(','),
+        }}
+      >
+        <div className="absolute inset-0">
+          <div style={slotStyle(0)} />
+          <div style={slotStyle(60)} />
+          <div style={slotStyle(120)} />
+        </div>
+
+        <div
+          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[3px] h-[3px] rounded-full"
+          style={{
+            background:
+              'radial-gradient(circle, rgba(50,45,40,0.45) 0%, rgba(50,45,40,0.15) 100%)',
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### 3.3 Dashboard Video Wrapper & YouTube Panel (`features/dashboard/components/video-player-wrapper.tsx` & `youtube-embed-panel.tsx`)
+
+#### Wrapper (`features/dashboard/components/video-player-wrapper.tsx`):
+```tsx
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import YouTubeEmbedPanel from "./youtube-embed-panel";
+import {
+  DASHBOARD_LECTURE_CHANGED_EVENT,
+  clearDashboardLecture,
+  readDashboardLecture,
+} from "@/lib/dashboard-lecture";
+
+export default function VideoPlayerWrapper() {
+  const router = useRouter();
+  const [selection, setSelection] = useState(() => readDashboardLecture());
+
+  const embedUrl = selection?.embedUrl ?? null;
+
+  useEffect(() => {
+    const sync = () => setSelection(readDashboardLecture());
+    sync();
+    window.addEventListener(DASHBOARD_LECTURE_CHANGED_EVENT, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(DASHBOARD_LECTURE_CHANGED_EVENT, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+
+  return (
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-col">
+      <YouTubeEmbedPanel
+        embedUrl={embedUrl}
+        activeLabel={selection?.label ?? null}
+        onWatchLecture={() => router.push("/library")}
+        onClearLecture={() => {
+          clearDashboardLecture();
+          setSelection(null);
+        }}
+        onEnterFocus={embedUrl ? () => router.push("/rooms") : undefined}
+        focusMode={false}
+      />
+    </div>
+  );
+}
+```
+
+#### YouTube Embed Panel (`features/dashboard/components/youtube-embed-panel.tsx`):
+```tsx
+'use client';
+
+import { motion } from 'motion/react';
+import { Maximize2, Plus, X } from 'lucide-react';
+import {
+  PANEL_SHADOW,
+  OUTER_RADIUS,
+  GAP,
+  INNER_RADIUS,
+  SCREW_SIZE,
+  SCREW_INSET,
+  Screw,
+} from './panel-primitives';
+import { SPRING_HOVER } from '@/lib/ui-motion';
+
+const EMPTY_TOOLTIP = 'start watching a youtube video';
+
+type Props = {
+  embedUrl: string | null;
+  large?: boolean;
+  emptyHint?: string | null;
+  onWatchLecture?: () => void;
+  onClearLecture?: () => void;
+  activeLabel?: string | null;
+  onEnterFocus?: () => void;
+  focusMode?: boolean;
+};
+
+export default function YouTubeEmbedPanel({
+  embedUrl,
+  large = false,
+  emptyHint = null,
+  onWatchLecture,
+  onClearLecture,
+  activeLabel,
+  onEnterFocus,
+  focusMode = false,
+}: Props) {
+  const screwInset = SCREW_INSET;
+  const isLibraryLayout = large;
+  const showDashboardLectureEmpty = !isLibraryLayout && !!onWatchLecture;
+
+  return (
+    <div
+      className={
+        isLibraryLayout
+          ? 'flex w-full min-w-0 flex-col items-stretch'
+          : 'flex h-full w-full min-h-0 min-w-0 max-w-[100vw] items-stretch justify-center pl-0 pr-0 pt-1.5 pb-3 sm:pl-2 sm:pr-1 sm:pt-2 sm:pb-4 lg:justify-end lg:pr-0.5'
+      }
+    >
+      <motion.div
+        className={
+          'relative flex w-full flex-col border border-black/[0.035] bg-[color:var(--panel-texture-bg)] ring-1 ring-inset ring-black/[0.035] ' +
+          (isLibraryLayout
+            ? 'min-w-0 shrink-0'
+            : 'h-full min-h-0 min-w-0 max-h-full w-full shrink-0 sm:max-w-[min(100%,94vw)] lg:w-[min(100%,90%)]')
+        }
+        style={{
+          borderRadius: `${OUTER_RADIUS}px`,
+          padding: `${GAP}px`,
+          boxShadow: PANEL_SHADOW,
+        }}
+        whileHover={
+          isLibraryLayout ? undefined : { y: -1, rotate: 0.06, scale: 1.002 }
+        }
+        transition={SPRING_HOVER}
+      >
+        <Screw
+          className="absolute"
+          style={{
+            top: screwInset,
+            left: screwInset,
+            width: SCREW_SIZE,
+            height: SCREW_SIZE,
+          }}
+        />
+        <Screw
+          className="absolute"
+          style={{
+            top: screwInset,
+            right: screwInset,
+            width: SCREW_SIZE,
+            height: SCREW_SIZE,
+          }}
+        />
+
+        <div
+          className={
+            isLibraryLayout
+              ? 'relative aspect-video w-full overflow-hidden bg-neutral-950'
+              : 'relative flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden bg-neutral-950'
+          }
+          style={{ borderRadius: `${INNER_RADIUS}px` }}
+        >
+          {embedUrl && onClearLecture && !focusMode && (
+            <motion.button
+              type="button"
+              whileTap={{ scale: 0.96 }}
+              onClick={onClearLecture}
+              className="absolute right-2 top-2 z-20 flex h-10 w-10 items-center justify-center rounded-lg border border-white/18 bg-black/45 text-white/85 backdrop-blur-sm transition-colors hover:bg-black/60 hover:text-white"
+              aria-label="Clear lecture"
+            >
+              <X size={15} strokeWidth={1.9} />
+            </motion.button>
+          )}
+          {embedUrl && onEnterFocus && !focusMode && (
+            <motion.button
+              type="button"
+              whileTap={{ scale: 0.96 }}
+              onClick={onEnterFocus}
+              className="absolute left-2 top-2 z-20 flex h-10 w-10 items-center justify-center rounded-lg border border-white/18 bg-black/45 text-white/85 backdrop-blur-sm transition-colors hover:bg-black/60 hover:text-white"
+              aria-label="Focus mode — full screen lecture"
+              title="Focus mode — full screen lecture"
+            >
+              <Maximize2 size={15} strokeWidth={1.9} />
+            </motion.button>
+          )}
+          {embedUrl ? (
+            <iframe
+              src={embedUrl}
+              title="YouTube player"
+              className={
+                isLibraryLayout
+                  ? 'absolute inset-0 h-full w-full'
+                  : 'h-full w-full'
+              }
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              referrerPolicy="strict-origin-when-cross-origin"
+              allowFullScreen
+            />
+          ) : showDashboardLectureEmpty ? (
+            <div className="flex h-full w-full flex-1 items-center justify-center">
+              <button
+                type="button"
+                onClick={onWatchLecture}
+                title={EMPTY_TOOLTIP}
+                aria-label={EMPTY_TOOLTIP}
+                className="flex h-11 w-11 items-center justify-center rounded-full border border-white/22 text-white/88 transition-colors hover:border-white/45 hover:bg-white/10 hover:text-white"
+              >
+                <Plus className="h-5 w-5" strokeWidth={1.75} aria-hidden />
+              </button>
+            </div>
+          ) : emptyHint ? (
+            <p className="max-w-[20rem] px-4 text-center text-xs leading-snug text-white/55 text-balance antialiased">
+              {emptyHint}
+            </p>
+          ) : null}
+          {embedUrl && activeLabel && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 via-black/35 to-transparent px-3 pb-2.5 pt-8 text-center">
+              <p className="truncate text-[10.5px] text-white/85">
+                {activeLabel}
+              </p>
+            </div>
+          )}
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+```
+
+---
+
+### 3.4 Motion & Physics Presets (`lib/ui-motion.ts`)
+
+```ts
+export const EASE_OUT_SMOOTH = [0.2, 0, 0, 1] as const;
+export const EASE_OUT = [0, 0, 0.58, 1] as const;
+export const EASE_IN = [0.42, 0, 1, 1] as const;
+
+export const DURATION = {
+  fast: 0.18,
+  medium: 0.22,
+  slow: 0.28,
+} as const;
+
+export const SPRING_SNAP = {
+  type: "spring" as const,
+  stiffness: 420,
+  damping: 34,
+  mass: 0.55,
+};
+
+export const SPRING_DRAG_RELEASE = {
+  bounceStiffness: 520,
+  bounceDamping: 38,
+};
+
+export const SPRING_HOVER = {
+  type: "spring" as const,
+  stiffness: 380,
+  damping: 32,
+  mass: 0.58,
+};
+
+export const TAP_SCALE = 0.96;
+```
