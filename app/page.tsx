@@ -1,69 +1,206 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import React, { useEffect, useState } from 'react';
+import { AppShell } from '@/components/layout/app-shell';
+import { StatCard } from '@/components/dashboard/stat-card';
+import { WorkerStatusList } from '@/components/dashboard/worker-status';
+import { QueueOverview } from '@/components/dashboard/queue-overview';
+import { ActivityList } from '@/components/dashboard/activity-list';
+import { MediaUploadModal } from '@/components/media/media-upload-modal';
+import { Button } from '@/components/ui/button';
+import { getProjects } from '@/lib/api/projects';
+import { getMediaItems } from '@/lib/api/media';
+import { getWorkers, getQueueMetrics } from '@/lib/api/workers';
+import { getJobs } from '@/lib/api/jobs';
+import { Project } from '@/types/projects';
+import { MediaItem } from '@/types/media';
+import { WorkerInfo, QueueMetrics } from '@/types/worker';
+import { Job } from '@/types/jobs';
+import {
+  Layers,
+  Film,
+  Cpu,
+  CheckCircle2,
+  AlertOctagon,
+  Plus,
+  Play,
+  Flame,
+} from 'lucide-react';
+import Link from 'next/link';
+
+export default function DashboardOverviewPage() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [mediaList, setMediaList] = useState<MediaItem[]>([]);
+  const [workers, setWorkers] = useState<WorkerInfo[]>([]);
+  const [queueMetrics, setQueueMetrics] = useState<QueueMetrics | null>(null);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+
+  useEffect(() => {
+    async function loadData() {
+      const [projData, mediaData, workerData, queueData, jobsData] = await Promise.all([
+        getProjects(),
+        getMediaItems(),
+        getWorkers(),
+        getQueueMetrics(),
+        getJobs(),
+      ]);
+
+      setProjects(projData);
+      setMediaList(mediaData);
+      setWorkers(workerData);
+      setQueueMetrics(queueData);
+      setJobs(jobsData);
+    }
+    loadData();
+  }, []);
+
+  const totalProjects = projects.length;
+  const totalMedia = mediaList.length;
+  const processingMediaCount = mediaList.filter((m) => m.status === 'processing' || m.status === 'queued').length;
+  const completedJobsCount = queueMetrics?.totalCompleted24h || 359;
+  const failedJobsCount = queueMetrics?.totalFailed24h || 3;
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <AppShell
+      breadcrumbs={[{ label: 'Dashboard Overview' }]}
+      actions={
+        <div className="flex items-center gap-2">
+          <Link href="/media/media_launch_keynote">
+            <Button variant="outline" size="sm" className="hidden sm:inline-flex text-xs font-mono">
+              <Play className="size-3 text-yellow-400 fill-current" />
+              <span>Interactive Pipeline</span>
+            </Button>
+          </Link>
+          <Button
+            variant="accent"
+            size="sm"
+            onClick={() => setUploadModalOpen(true)}
+            className="text-xs font-mono"
+          >
+            <Plus className="size-3.5" />
+            <span>Ingest Media</span>
+          </Button>
+        </div>
+      }
+    >
+      {/* Top Banner: Architecture Context */}
+      <div className="rounded-xl border border-blue-900/40 bg-blue-950/20 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Flame className="size-4 text-blue-400" />
+            <h2 className="text-xs font-mono font-bold uppercase tracking-wider text-blue-300">
+              YellowBird Distributed Engine Status
+            </h2>
+          </div>
+          <p className="text-xs text-zinc-300 font-mono text-pretty">
+            Live telemetry stream from Go worker pool and Redis Streams. FFmpeg transcode matrix operational.
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <Link href="/media/media_launch_keynote">
+            <Button variant="default" size="sm" className="font-mono text-xs shadow-md">
+              <span>Inspect Live Media Processing</span>
+            </Button>
+          </Link>
         </div>
-      </main>
-    </div>
+      </div>
+
+      {/* 5 Summary Stat Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+        <StatCard
+          title="Projects"
+          value={totalProjects}
+          sublabel="Active workspaces"
+          icon={Layers}
+          variant="default"
+        />
+        <StatCard
+          title="Media Assets"
+          value={totalMedia}
+          sublabel="Master video files"
+          icon={Film}
+          variant="default"
+        />
+        <StatCard
+          title="Processing"
+          value={processingMediaCount}
+          sublabel="Queued / in-flight"
+          icon={Cpu}
+          variant="running"
+          trend="2 workers"
+        />
+        <StatCard
+          title="Completed (24h)"
+          value={completedJobsCount}
+          sublabel="Renditions published"
+          icon={CheckCircle2}
+          variant="completed"
+          trend="100% SLA"
+        />
+        <StatCard
+          title="Failed / Retries"
+          value={failedJobsCount}
+          sublabel="Automatic retry active"
+          icon={AlertOctagon}
+          variant="failed"
+          trend="0.8% error rate"
+        />
+      </div>
+
+      {/* Main Split: Worker Status (Left) & Queue Telemetry (Right) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 space-y-6">
+          <WorkerStatusList workers={workers} />
+          <ActivityList recentJobs={jobs} />
+        </div>
+
+        <div className="space-y-6">
+          {queueMetrics ? <QueueOverview metrics={queueMetrics} /> : null}
+
+          {/* Quick Shortcuts to Projects */}
+          <div className="rounded-xl border border-zinc-850 bg-zinc-950/70 p-5 space-y-3">
+            <div className="flex items-center justify-between border-b border-zinc-850 pb-3">
+              <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-200">
+                Active Projects
+              </h3>
+              <Link href="/projects" className="text-[11px] font-mono text-zinc-400 hover:text-white">
+                View all ({projects.length})
+              </Link>
+            </div>
+
+            <div className="space-y-2">
+              {projects.slice(0, 3).map((p) => (
+                <Link
+                  key={p.id}
+                  href={`/projects/${p.id}`}
+                  className="flex items-center justify-between p-2.5 rounded-lg border border-zinc-850 bg-zinc-900/30 hover:bg-zinc-900/60 hover:border-zinc-800 transition-colors group"
+                >
+                  <div className="space-y-0.5 truncate">
+                    <span className="text-xs font-mono font-semibold text-zinc-200 group-hover:text-white block truncate">
+                      {p.name}
+                    </span>
+                    <span className="text-[10px] font-mono text-zinc-500 block">
+                      {p.mediaCount} media files • {p.processingCount} in-flight
+                    </span>
+                  </div>
+                  <span className="text-xs text-zinc-500 group-hover:text-zinc-300 font-mono">
+                    →
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Ingest Modal */}
+      <MediaUploadModal
+        open={uploadModalOpen}
+        onClose={() => setUploadModalOpen(false)}
+        projects={projects}
+      />
+    </AppShell>
   );
 }
