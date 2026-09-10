@@ -132,3 +132,38 @@ body { background: #f8f6f3; color: #282725; }
 .yb-rendition-frame.is-selected { box-shadow: 0 0 0 .5px rgba(169,136,80,.3), inset 0 1px 0 rgba(255,255,255,.9), 0 4px 11px rgba(169,136,80,.12); }
 .yb-library-preview { border-radius: 16px; box-shadow: 0 0 0 .5px rgba(67,60,55,.08), inset 0 1px 0 rgba(255,255,255,.95), 0 8px 20px rgba(80,62,52,.07); }
 .yb-stack-card { box-shadow: 0 0 0 .5px rgba(67,60,55,.13), inset 0 1px 0 rgba(255,255,255,.92), 0 9px 18px rgba(72,58,48,.13); }
+
+/* Soft glass material pass: texture stays atmospheric, surfaces carry hierarchy. */
+.yb-shell {
+  background-color: #faf9f7;
+  background-image:
+    repeating-linear-gradient(135deg, rgba(188,116,126,.038) 0, rgba(188,116,126,.038) 1px, transparent 1px, transparent 12px),
+    repeating-linear-gradient(45deg, rgba(255,255,255,.56) 0, rgba(255,255,255,.56) 1px, transparent 1px, transparent 17px),
+    radial-gradient(rgba(71,65,61,.075) .55px, transparent .55px),
+    radial-gradient(circle at 50% -20%, rgba(255,255,255,.96), transparent 52rem);
+  background-size: 19px 19px, 23px 23px, 21px 21px, auto;
+  background-blend-mode: normal, screen, normal, normal;
+}
+.yb-shell::before { opacity: .13; background-image: radial-gradient(rgba(117,98,96,.1) .55px, transparent .55px); }
+.yb-control-strip, .yb-library-preview, .yb-board-shell {
+  border-color: rgba(255,255,255,.72);
+  background: linear-gradient(135deg, rgba(255,255,255,.68), rgba(255,255,255,.42));
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+}
+.yb-control-strip { box-shadow: 0 0 0 .5px rgba(84,67,55,.08), inset 0 1px 0 rgba(255,255,255,.92), 0 2px 4px rgba(84,67,55,.04), 0 10px 24px rgba(84,67,55,.06); }
+.yb-board-shell { box-shadow: 0 0 0 .5px rgba(84,67,55,.08), inset 0 1px 0 rgba(255,255,255,.95), 0 2px 5px rgba(84,67,55,.05), 0 14px 32px rgba(84,67,55,.09); }
+.yb-library-preview { box-shadow: 0 0 0 .5px rgba(84,67,55,.08), inset 0 1px 0 rgba(255,255,255,.95), 0 2px 5px rgba(84,67,55,.04), 0 10px 24px rgba(84,67,55,.07); }
+.yb-control-strip:hover, .yb-board-shell:hover, .yb-library-preview:hover { border-color: rgba(255,255,255,.9); }
+.yb-rendition-frame, .yb-quiet-button, .yb-clear-button, .yb-library-arrow {
+  border-color: rgba(89,73,61,.12);
+  background: rgba(255,255,255,.42);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.84), 0 1px 2px rgba(84,67,55,.055);
+}
+.yb-rendition-frame:hover, .yb-quiet-button:hover, .yb-clear-button:hover { background: rgba(255,255,255,.72); }
+.yb-rendition-frame.is-selected { background: rgba(255,250,247,.78); }
+.yb-upload-primary { box-shadow: 0 0 0 .5px rgba(91,67,31,.22), inset 0 1px 0 rgba(255,255,255,.5), inset 0 -1px 0 rgba(119,82,28,.16), 0 2px 2px rgba(70,48,18,.1), 0 5px 12px rgba(169,136,80,.16); }
+.yb-upload-primary:hover { box-shadow: 0 0 0 .5px rgba(91,67,31,.28), inset 0 1px 0 rgba(255,255,255,.54), inset 0 -1px 0 rgba(119,82,28,.16), 0 3px 4px rgba(70,48,18,.11), 0 8px 17px rgba(169,136,80,.2); }
+@media (prefers-reduced-transparency: reduce) {
+  .yb-control-strip, .yb-library-preview, .yb-board-shell { background: #fff; backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
