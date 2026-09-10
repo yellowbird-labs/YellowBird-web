@@ -2,9 +2,12 @@
 
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { AuthGate } from '@/components/auth/auth-gate';
 import { ArrowUpRight, Check, ChevronRight, FileImage, FileVideo, ImagePlus, LoaderCircle, Maximize2, Pause, Play, RotateCcw, RotateCw, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { toast } from 'sonner';
-import { getProjects, hasAuthToken, pollMediaUntilTerminal, uploadMedia, type Job, type Media, type Project, type Rendition as ApiRendition } from '@/lib/yellowbird-api';
+import { getProjects, pollMediaUntilTerminal, uploadMedia, type Job, type Media, type Project, type Rendition as ApiRendition } from '@/lib/yellowbird-api';
+import { hasAuthToken, notifyAuthExpired } from '@/lib/auth/session';
 
 type Rendition = ApiRendition & { label: string; detail: string; ready: boolean };
 
@@ -15,6 +18,7 @@ function toUiRendition(rendition: ApiRendition): Rendition {
 }
 
 export default function Home() {
+  const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -68,7 +72,7 @@ export default function Home() {
     }
 
     if (!hasAuthToken()) {
-      toast.error('Authentication required', { description: 'Add a JWT to localStorage as yb_auth_token before uploading.' });
+      toast.error('Authentication required', { description: 'Sign in before uploading media.' });
       return;
     }
     abortRef.current?.abort();
@@ -199,8 +203,8 @@ export default function Home() {
   }, [error, file, isProcessing, isUploading, jobProgress, mediaStatus, readyRenditions.length, uploadProgress]);
 
   return (
-    <main className="yb-shell">
-      <header className="yb-minimal-nav"><Link href="/" className="yb-wordmark" aria-label="Yellowbird home"><span>yellowbird</span><i /></Link><div className="yb-nav-meta"><span><span className="yb-live-dot" /> local engine online</span><Link href="/library">Library <ArrowUpRight className="size-3" /></Link></div></header>
+    <AuthGate><main className="yb-shell">
+      <header className="yb-minimal-nav"><Link href="/" className="yb-wordmark" aria-label="Yellowbird home"><span>yellowbird</span><i /></Link><div className="yb-nav-meta"><span><span className="yb-live-dot" /> local engine online</span><Link href="/library">Library <ArrowUpRight className="size-3" /></Link><button type="button" onClick={() => { notifyAuthExpired(); router.replace('/login'); }}>Sign out</button></div></header>
 
       <section className="yb-control-strip">
         <div className="yb-output-label"><span className="yb-kicker">Outputs</span><span className="yb-count">{readyRenditions.length}/{renditions.length || '—'}</span></div>
@@ -230,6 +234,6 @@ export default function Home() {
 
       <footer className="yb-bottom-note"><span><span className="yb-note-dot" /> Drag & drop is active on the preview</span><span className="yb-footer-shortcut"><span>⌘</span><span>O</span> to upload</span></footer>
       <input ref={inputRef} type="file" accept="video/*,image/*" onChange={onFileChange} className="yb-visually-hidden" />
-    </main>
+    </main></AuthGate>
   );
 }
