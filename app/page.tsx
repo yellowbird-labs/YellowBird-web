@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import { AuthGate } from '@/components/auth/auth-gate';
 import { ArrowUpRight, Check, ChevronRight, FileImage, FileVideo, ImagePlus, LoaderCircle, Maximize2, Pause, Play, RotateCcw, RotateCw, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { toast } from 'sonner';
-import { getProjects, pollMediaUntilTerminal, uploadMedia, type Job, type Media, type Project, type Rendition as ApiRendition } from '@/lib/yellowbird-api';
+import { createProject, getProjects, pollMediaUntilTerminal, uploadMedia, type Job, type Media, type Project, type Rendition as ApiRendition } from '@/lib/yellowbird-api';
 import { hasAuthToken, notifyAuthExpired } from '@/lib/auth/session';
 
 type Rendition = ApiRendition & { label: string; detail: string; ready: boolean };
@@ -33,7 +33,12 @@ export default function Home() {
   const [mediaStatus, setMediaStatus] = useState<Media['status'] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState(process.env.NEXT_PUBLIC_YELLOWBIRD_PROJECT_ID || '');
+  const [projectId, setProjectId] = useState('');
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [projectLoadError, setProjectLoadError] = useState<string | null>(null);
+  const [isProjectFormOpen, setIsProjectFormOpen] = useState(false);
+  const [projectName, setProjectName] = useState('');
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -56,12 +61,34 @@ export default function Home() {
   }, [objectUrl]);
 
   useEffect(() => {
-    if (!hasAuthToken() || projectId) return;
+    if (!hasAuthToken()) return;
     getProjects().then((items) => {
       setProjects(items);
-      if (items[0]) setProjectId(items[0].id);
-    }).catch(() => undefined);
-  }, [projectId]);
+      setProjectId((current) => current && items.some((project) => project.id === current) ? current : items.length === 1 ? items[0].id : '');
+      setProjectLoadError(null);
+    }).catch((requestError) => {
+      setProjectLoadError(requestError instanceof Error ? requestError.message : 'Could not load projects.');
+    }).finally(() => setProjectsLoading(false));
+  }, []);
+
+  const submitProject = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = projectName.trim();
+    if (!name) { toast.error('Name your project first'); return; }
+    setIsCreatingProject(true);
+    try {
+      const project = await createProject({ name });
+      setProjects((current) => [...current, project]);
+      setProjectId(project.id);
+      setProjectName('');
+      setIsProjectFormOpen(false);
+      setProjectLoadError(null);
+      toast.success('Project created', { description: `${project.name} is ready for uploads.` });
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : 'Could not create the project.';
+      toast.error('Could not create project', { description: message.includes('required') ? 'Enter a project name and try again.' : 'The project could not be created right now.' });
+    } finally { setIsCreatingProject(false); }
+  };
 
   const acceptFile = async (incoming: File) => {
     const valid = incoming.type.startsWith('video/') || incoming.type.startsWith('image/');
@@ -76,21 +103,11 @@ export default function Home() {
       return;
     }
     abortRef.current?.abort();
-    let activeProjectId = projectId;
+    const activeProjectId = projectId;
     if (!activeProjectId) {
-      try {
-        const availableProjects = projects.length ? projects : await getProjects();
-        setProjects(availableProjects);
-        activeProjectId = availableProjects[0]?.id || '';
-        setProjectId(activeProjectId);
-      } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : 'Could not load projects.';
-        setError(message); toast.error('Could not load projects', { description: message }); return;
-      }
-    }
-    if (!activeProjectId) {
-      setError('Create a project in the backend before uploading media.');
-      toast.error('No project available', { description: 'The upload API requires a project_id.' });
+      const message = projectLoadError ? 'Projects could not be loaded.' : projectsLoading ? 'Projects are still loading.' : 'Create or select a project before uploading.';
+      setError(message);
+      toast.error(projectLoadError ? 'Could not load projects' : 'Project required', { description: projectLoadError ? 'Check your connection and try again.' : projectsLoading ? 'Wait a moment for your projects to load.' : 'Every upload belongs to a project.' });
       return;
     }
 
@@ -209,7 +226,9 @@ export default function Home() {
       <section className="yb-control-strip">
         <div className="yb-output-label"><span className="yb-kicker">Outputs</span><span className="yb-count">{readyRenditions.length}/{renditions.length || '—'}</span></div>
         <div className="yb-horizontal-renditions">{readyRenditions.length ? readyRenditions.map((rendition) => <button key={rendition.id} className={`yb-rendition-frame ${selectedRendition?.id === rendition.id ? 'is-selected' : ''}`} onClick={() => setSelectedId(rendition.id)}><span className="yb-frame-image">{objectUrl && !isVideo ? <img src={objectUrl} alt="" /> : <span className="yb-frame-bars"><i /><i /><i /></span>}<span className="yb-frame-play">{isVideo ? <Play className="size-3" fill="currentColor" /> : <FileImage className="size-3" />}</span></span><span className="yb-frame-label"><strong>{rendition.label}{!isVideo && 'px'}</strong><small>{rendition.detail}</small></span></button>) : <div className="yb-rail-empty">{isProcessing ? <><LoaderCircle className="size-4 animate-spin" />Building outputs</> : 'Outputs will appear here'}</div>}</div>
+        <div className="yb-project-control">{projects.length > 1 ? <label><span>Project</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} aria-label="Select project"><option value="" disabled>Select project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : projects.length === 1 ? <span className="yb-project-selected"><span>Project</span><strong>{projects[0].name}</strong></span> : <button type="button" className="yb-project-create-link" onClick={() => setIsProjectFormOpen(true)} disabled={projectsLoading}>{projectsLoading ? 'Loading projects…' : '＋ Create project'}</button>}</div>
         <button className="yb-upload-primary" onClick={() => inputRef.current?.click()}><Upload className="size-4" /> Upload media</button>
+        {isProjectFormOpen ? <form className="yb-project-form" onSubmit={submitProject}><input autoFocus value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Project name" aria-label="Project name" maxLength={255} /><button type="submit" disabled={isCreatingProject}>{isCreatingProject ? <LoaderCircle className="size-3.5 animate-spin" /> : 'Create'}</button><button type="button" onClick={() => setIsProjectFormOpen(false)} aria-label="Cancel project creation"><X className="size-3.5" /></button></form> : null}
       </section>
 
       <section className="yb-workbench">

@@ -5,7 +5,7 @@ export const API_BASE_URL = `${API_ORIGIN.replace(/\/$/, '')}/api/v1`;
 
 export type MediaStatus = 'pending' | 'uploading' | 'uploaded' | 'processing' | 'ready' | 'failed';
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed';
-export interface Project { id: string; name: string; description?: string; }
+export interface Project { id: string; owner_id: string; name: string; description: string; created_at: string; updated_at: string; }
 export interface Media { id: string; project_id: string; original_file_name: string; mime_type: string; size: number; status: MediaStatus; duration_seconds?: number; width?: number; height?: number; }
 export interface Job { id: string; media_id: string; type: 'thumbnail' | 'preview' | 'transcode'; target_height?: 360 | 720 | 1080 | null; status: JobStatus; progress: number; error?: string; }
 export interface Rendition { id: string; media_id: string; type: 'thumbnail' | 'preview' | 'transcode'; url: string; mime_type: string; size: number; width?: number; height?: number; duration_seconds?: number; }
@@ -29,6 +29,7 @@ async function request<T>(path: string, init?: RequestInit, protectedRequest = t
 export function registerUser(input: RegisterInput) { return request<AuthUser>('/users/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }, false); }
 export async function loginUser(input: LoginInput) { const session = await request<AuthSession>('/users/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }, false); setSession(session); return session; }
 export function getProjects() { return request<Project[]>('/projects'); }
+export function createProject(input: { name: string; description?: string }) { return request<Project>('/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }); }
 export function getMedia(mediaId: string, signal?: AbortSignal) { return request<Media>(`/media/${mediaId}`, { signal }); }
 export function getJobs(mediaId: string, signal?: AbortSignal) { return request<Job[]>(`/jobs?media_id=${encodeURIComponent(mediaId)}`, { signal }); }
 export function getRenditions(mediaId: string, signal?: AbortSignal) { return request<Rendition[]>(`/renditions?media_id=${encodeURIComponent(mediaId)}`, { signal }); }
