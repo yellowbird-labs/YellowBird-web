@@ -2,7 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { getSession } from '@/lib/auth/session';
+import { getSession, hasAuthToken } from '@/lib/auth/session';
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -14,8 +14,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   );
 
   useEffect(() => {
-    const redirect = () => router.replace(`/login?next=${encodeURIComponent(pathname || '/')}`);
-    if (!authenticated) redirect();
+    // Read the session fresh at effect time: the hydration snapshot is always
+    // "false", so deciding on the snapshot alone would bounce valid sessions.
+    if (hasAuthToken()) return;
+    router.replace(`/login?next=${encodeURIComponent(pathname || '/')}`);
   }, [authenticated, pathname, router]);
 
   if (!authenticated) return <main className="yb-auth-loading"><span className="yb-auth-spinner" />Checking your workspace</main>;

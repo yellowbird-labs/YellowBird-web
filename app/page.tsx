@@ -1,13 +1,15 @@
 'use client';
 
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { AuthGate } from '@/components/auth/auth-gate';
-import { ArrowUpRight, Check, ChevronRight, FileImage, FileVideo, ImagePlus, LoaderCircle, Maximize2, Pause, Play, RotateCcw, RotateCw, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from 'lucide-react';
+import { NavBar } from '@/components/nav-bar';
+import MediaStage from '@/components/workspace/media-stage';
+import { ArrowUpRight, ChevronRight, FileImage, LoaderCircle, Play, Upload, X } from 'lucide-react';
 import { toast } from 'sonner';
-import { createProject, getProjects, pollMediaUntilTerminal, uploadMedia, type Job, type Media, type Project, type Rendition as ApiRendition } from '@/lib/yellowbird-api';
-import { hasAuthToken, notifyAuthExpired } from '@/lib/auth/session';
+import { createProject, getProjects, getRenditions, pollMediaUntilTerminal, uploadMedia, type Job, type Project, type Rendition as ApiRendition } from '@/lib/yellowbird-api';
+import { hasAuthToken } from '@/lib/auth/session';
+import { clearPreviewSelection, readPreviewSelection, saveLibraryItem, toLibraryRendition, updateLibraryItem, type LibraryItem } from '@/lib/workspace-store';
 
 type Rendition = ApiRendition & { label: string; detail: string; ready: boolean };
 
@@ -17,10 +19,13 @@ function toUiRendition(rendition: ApiRendition): Rendition {
   return { ...rendition, label, detail, ready: true };
 }
 
-export default function Home() {
-  const router = useRouter();
+/** "720p" reads as "720p"; Poster/Preview stay as they are. */
+function slideLabel(rendition: Rendition) {
+  return /\dp$/.test(rendition.label) ? `${rendition.label}` : rendition.label;
+}
+
+function PreviewWorkspace() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
@@ -30,7 +35,6 @@ export default function Home() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [mediaStatus, setMediaStatus] = useState<Media['status'] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
@@ -39,21 +43,15 @@ export default function Home() {
   const [isProjectFormOpen, setIsProjectFormOpen] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [isCreatingProject, setIsCreatingProject] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(1);
-  const [playbackRate, setPlaybackRate] = useState(1);
-  const [imageScale, setImageScale] = useState(1);
-  const [imageRotation, setImageRotation] = useState(0);
+  const [seed, setSeed] = useState(() => readPreviewSelection());
 
-  const isVideo = file?.type.startsWith('video/') ?? false;
+  const isVideo = file ? (file.type ? file.type.startsWith('video/') : seed?.isVideo ?? true) : Boolean(seed?.url) && seed?.isVideo === true;
   const readyRenditions = renditions.filter((rendition) => rendition.ready && (isVideo ? rendition.mime_type.startsWith('video/') : rendition.mime_type.startsWith('image/')));
   const selectedRendition = readyRenditions.find((rendition) => rendition.id === selectedId) ?? readyRenditions[0];
-  const fileKind = isVideo ? 'video' : 'image';
-  const activeMediaUrl = selectedRendition?.url || objectUrl;
+  const thumbRenditions = renditions.filter((rendition) => rendition.ready && rendition.mime_type.startsWith('image/'));
+  const activeMediaUrl = selectedRendition?.url || objectUrl || seed?.url || null;
   const jobProgress = jobs.length ? Math.round(jobs.reduce((sum, job) => sum + job.progress, 0) / jobs.length) : 0;
+  const hasSource = Boolean(file || seed?.url);
 
   useEffect(() => () => {
     abortRef.current?.abort();
@@ -70,6 +68,16 @@ export default function Home() {
       setProjectLoadError(requestError instanceof Error ? requestError.message : 'Could not load projects.');
     }).finally(() => setProjectsLoading(false));
   }, []);
+
+  // Arriving from the library ("watch in preview") with no local source in hand.
+  useEffect(() => {
+    if (!seed) return;
+    getRenditions(seed.mediaId).then((items) => setRenditions(items.map(toUiRendition))).catch(() => setRenditions([]));
+  }, [seed]);
+
+  const seedLibraryItem = (mediaId: string, name: string, kind: 'video' | 'image'): LibraryItem => ({
+    id: mediaId, fileName: name, kind, uploadedAt: new Date().toISOString(), status: 'processing', renditions: [],
+  });
 
   const submitProject = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -93,7 +101,6 @@ export default function Home() {
   const acceptFile = async (incoming: File) => {
     const valid = incoming.type.startsWith('video/') || incoming.type.startsWith('image/');
     if (!valid) {
-      setError('Use a video or image file to start a rendition run.');
       toast.error('Unsupported file', { description: 'YellowBird accepts video and image files.' });
       return;
     }
@@ -105,56 +112,50 @@ export default function Home() {
     abortRef.current?.abort();
     const activeProjectId = projectId;
     if (!activeProjectId) {
-      const message = projectLoadError ? 'Projects could not be loaded.' : projectsLoading ? 'Projects are still loading.' : 'Create or select a project before uploading.';
-      setError(message);
-      toast.error(projectLoadError ? 'Could not load projects' : 'Project required', { description: projectLoadError ? 'Check your connection and try again.' : projectsLoading ? 'Wait a moment for your projects to load.' : 'Every upload belongs to a project.' });
+      const description = projectLoadError ? 'Check your connection and try again.' : projectsLoading ? 'Wait a moment for your projects to load.' : 'Every upload belongs to a project.';
+      toast.error(projectLoadError ? 'Could not load projects' : 'Project required', { description });
       return;
     }
 
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     const nextUrl = URL.createObjectURL(incoming);
+    clearPreviewSelection();
+    setSeed(null);
     setFile(incoming);
     setObjectUrl(nextUrl);
     setRenditions([]);
     setSelectedId(null);
-    setError(null);
     setIsUploading(true);
     setUploadProgress(0);
     setIsProcessing(false);
-    setMediaStatus('uploading');
     setJobs([]);
-    setIsPlaying(false);
-    setCurrentTime(0);
-    setDuration(0);
-    setImageScale(1);
-    setImageRotation(0);
 
+    const kind = incoming.type.startsWith('video/') ? 'video' : 'image';
     const uploadToast = toast.loading('Uploading source…', { description: incoming.name });
     try {
       const media = await uploadMedia(activeProjectId, incoming, setUploadProgress);
-      setMediaStatus(media.status);
       setIsUploading(false);
       setIsProcessing(true);
+      saveLibraryItem(seedLibraryItem(media.id, incoming.name, kind));
       toast.success('Upload received', { id: uploadToast, description: 'The backend queued your rendition jobs.' });
       const controller = new AbortController();
       abortRef.current = controller;
       const result = await pollMediaUntilTerminal(media.id, (nextMedia, nextJobs, nextRenditions) => {
-        setMediaStatus(nextMedia.status);
         setJobs(nextJobs);
         const mapped = nextRenditions.map(toUiRendition);
         setRenditions(mapped);
+        updateLibraryItem(media.id, { status: nextMedia.status === 'ready' ? 'ready' : nextMedia.status === 'failed' ? 'failed' : 'processing', renditions: nextRenditions.map(toLibraryRendition) });
         if (!selectedId && mapped[0]) setSelectedId(mapped[0].id);
       }, controller.signal);
-      setMediaStatus(result.media.status);
       setIsProcessing(false);
       setRenditions(result.renditions.map(toUiRendition));
+      updateLibraryItem(media.id, { status: 'ready', renditions: result.renditions.map(toLibraryRendition) });
       if (!selectedId && result.renditions[0]) setSelectedId(result.renditions[0].id);
-      toast.success('Processing complete', { description: `${result.renditions.length} backend renditions are ready.` });
+      toast.success('Renditions ready', { description: `${result.renditions.length} outputs are waiting in the library.` });
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : 'The backend could not process this media.';
       setIsUploading(false); setIsProcessing(false);
       if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
-      setMediaStatus('failed'); setError(message);
       toast.error('Processing failed', { id: uploadToast, description: message });
     }
   };
@@ -175,84 +176,123 @@ export default function Home() {
   const clearWorkspace = () => {
     abortRef.current?.abort();
     if (objectUrl) URL.revokeObjectURL(objectUrl);
-    setFile(null); setObjectUrl(null); setRenditions([]); setSelectedId(null); setIsProcessing(false); setIsUploading(false); setUploadProgress(0); setMediaStatus(null); setJobs([]); setError(null);
-    setIsPlaying(false); setCurrentTime(0); setDuration(0); setImageScale(1); setImageRotation(0);
-    toast('Workspace cleared', { description: 'Drop a new source to begin again.' });
+    clearPreviewSelection();
+    setFile(null); setObjectUrl(null); setRenditions([]); setSelectedId(null); setIsProcessing(false); setIsUploading(false); setUploadProgress(0); setJobs([]);
+    setSeed(null);
   };
-
-  const togglePlayback = async () => {
-    if (!videoRef.current) return;
-    if (videoRef.current.paused) {
-      try { await videoRef.current.play(); } catch { toast.error('Playback unavailable', { description: 'This browser could not start the local video.' }); }
-    } else {
-      videoRef.current.pause();
-    }
-  };
-
-  const updateVolume = (nextVolume: number) => {
-    setVolume(nextVolume);
-    if (videoRef.current) { videoRef.current.volume = nextVolume; videoRef.current.muted = nextVolume === 0; }
-  };
-
-  const toggleMute = () => updateVolume(volume === 0 ? 1 : 0);
-
-  const seek = (nextTime: number) => {
-    if (!videoRef.current) return;
-    videoRef.current.currentTime = nextTime;
-    setCurrentTime(nextTime);
-  };
-
-  const toggleFullscreen = async () => {
-    const stage = document.querySelector('.yb-media-stage');
-    if (!stage) return;
-    if (document.fullscreenElement) await document.exitFullscreen();
-    else await stage.requestFullscreen();
-  };
-
-  const formatTime = (time: number) => `${Math.floor(time / 60).toString().padStart(2, '0')}:${Math.floor(time % 60).toString().padStart(2, '0')}`;
 
   const statusLabel = useMemo(() => {
-    if (error) return 'Needs attention';
     if (isUploading) return `Uploading ${uploadProgress}%`;
-    if (isProcessing) return readyRenditions.length ? `${readyRenditions.length} renditions ready · ${jobProgress}%` : `Processing source · ${jobProgress}%`;
-    if (file) return mediaStatus === 'ready' ? 'Ready to preview' : mediaStatus || 'Ready to preview';
-    return 'Waiting for source';
-  }, [error, file, isProcessing, isUploading, jobProgress, mediaStatus, readyRenditions.length, uploadProgress]);
+    if (isProcessing) return readyRenditions.length ? `${readyRenditions.length} outputs · ${jobProgress}%` : `Processing · ${jobProgress}%`;
+    return 'Working';
+  }, [isProcessing, isUploading, jobProgress, readyRenditions.length, uploadProgress]);
+
+  const stackCards = (isVideo ? thumbRenditions : readyRenditions).slice().reverse();
 
   return (
-    <AuthGate><main className="yb-shell">
-      <header className="yb-minimal-nav"><Link href="/" className="yb-wordmark" aria-label="Yellowbird home"><span>yellowbird</span><i /></Link><div className="yb-nav-meta"><span><span className="yb-live-dot" /> local engine online</span><Link href="/library">Library <ArrowUpRight className="size-3" /></Link><button type="button" onClick={() => { notifyAuthExpired(); router.replace('/login'); }}>Sign out</button></div></header>
+    <main className="yb-shell">
+      <NavBar />
 
-      <section className="yb-control-strip">
+      <section className="yb-strip">
         <div className="yb-output-label"><span className="yb-kicker">Outputs</span><span className="yb-count">{readyRenditions.length}/{renditions.length || '—'}</span></div>
-        <div className="yb-horizontal-renditions">{readyRenditions.length ? readyRenditions.map((rendition) => <button key={rendition.id} className={`yb-rendition-frame ${selectedRendition?.id === rendition.id ? 'is-selected' : ''}`} onClick={() => setSelectedId(rendition.id)}><span className="yb-frame-image">{objectUrl && !isVideo ? <img src={objectUrl} alt="" /> : <span className="yb-frame-bars"><i /><i /><i /></span>}<span className="yb-frame-play">{isVideo ? <Play className="size-3" fill="currentColor" /> : <FileImage className="size-3" />}</span></span><span className="yb-frame-label"><strong>{rendition.label}{!isVideo && 'px'}</strong><small>{rendition.detail}</small></span></button>) : <div className="yb-rail-empty">{isProcessing ? <><LoaderCircle className="size-4 animate-spin" />Building outputs</> : 'Outputs will appear here'}</div>}</div>
-        <div className="yb-project-control">{projects.length > 1 ? <label><span>Project</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} aria-label="Select project"><option value="" disabled>Select project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : projects.length === 1 ? <span className="yb-project-selected"><span>Project</span><strong>{projects[0].name}</strong></span> : <button type="button" className="yb-project-create-link" onClick={() => setIsProjectFormOpen(true)} disabled={projectsLoading}>{projectsLoading ? 'Loading projects…' : '＋ Create project'}</button>}</div>
-        <button className="yb-upload-primary" onClick={() => inputRef.current?.click()}><Upload className="size-4" /> Upload media</button>
+        <div className="yb-rendition-rail">
+          {readyRenditions.length ? readyRenditions.map((rendition) => (
+            <button key={rendition.id} className={`yb-rendition-frame ${selectedRendition?.id === rendition.id ? 'is-selected' : ''}`} onClick={() => setSelectedId(rendition.id)}>
+              <span className="yb-frame-image">
+                {rendition.mime_type.startsWith('image/') && rendition.url ? <img src={rendition.url} alt="" /> : null}
+                {isVideo ? <span className="yb-frame-play"><Play className="size-2.5" fill="currentColor" aria-hidden /></span> : null}
+              </span>
+              <span className="yb-frame-label"><strong>{slideLabel(rendition)}</strong><small>{rendition.detail}</small></span>
+            </button>
+          )) : <div className="yb-rail-empty">{hasSource && (isProcessing || isUploading) ? <><LoaderCircle className="size-3.5 animate-spin" /> Building outputs</> : 'Outputs will appear here'}</div>}
+        </div>
+        <div className="yb-project-control">
+          {projects.length > 1 ? (
+            <label><span>Project</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} aria-label="Select project"><option value="" disabled>Select project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+          ) : projects.length === 1 ? (
+            <span className="yb-project-selected"><span>Project</span><strong>{projects[0].name}</strong></span>
+          ) : (
+            <button type="button" className="yb-project-create-link" onClick={() => setIsProjectFormOpen(true)} disabled={projectsLoading}>{projectsLoading ? 'Loading…' : 'Create project'}</button>
+          )}
+        </div>
+        {hasSource ? <button type="button" className="yb-ghost-button" onClick={clearWorkspace} aria-label="Clear workspace"><X className="size-3.5" /> Clear</button> : null}
+        <button className="yb-upload-primary" onClick={() => inputRef.current?.click()}><Upload className="size-4" aria-hidden /> Upload media</button>
       </section>
+
       {isProjectFormOpen ? <div className="yb-project-dialog-layer" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setIsProjectFormOpen(false); }}><div className="yb-project-dialog" role="dialog" aria-modal="true" aria-labelledby="project-dialog-title"><button type="button" className="yb-project-dialog-close" onClick={() => setIsProjectFormOpen(false)} aria-label="Close project creation"><X className="size-4" /></button><span className="yb-kicker">New project</span><h2 id="project-dialog-title">Where should this work live?</h2><p>Give your uploads a home before you begin.</p><form className="yb-project-form" onSubmit={submitProject}><label htmlFor="project-name">Project name</label><input id="project-name" autoFocus value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="e.g. Client films" maxLength={255} /><div className="yb-project-dialog-actions"><button type="button" onClick={() => setIsProjectFormOpen(false)}>Cancel</button><button type="submit" disabled={isCreatingProject}>{isCreatingProject ? <LoaderCircle className="size-3.5 animate-spin" /> : 'Create project'}</button></div></form></div></div> : null}
 
       <section className="yb-workbench">
         <div className="yb-board-shell">
-          <div className="yb-screw yb-screw-left" aria-hidden="true"><i /><i /><i /></div><div className="yb-screw yb-screw-right" aria-hidden="true"><i /><i /><i /></div>
-          <div className={`yb-media-stage ${isDragging ? 'is-dragging' : ''} ${file ? 'has-media' : ''}`} onDragEnter={(event) => { event.preventDefault(); setIsDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setIsDragging(false); }} onDrop={onDrop}>
-            {activeMediaUrl && isVideo ? <video key={activeMediaUrl} ref={videoRef} src={activeMediaUrl} className="yb-media-content" aria-label={`${file?.name} preview`} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration); event.currentTarget.volume = volume; event.currentTarget.playbackRate = playbackRate; }} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onEnded={() => setIsPlaying(false)} /> : null}
-            {activeMediaUrl && !isVideo ? <img src={activeMediaUrl} alt={`${file?.name} preview`} className="yb-media-content yb-image-content" style={{ transform: `scale(${imageScale}) rotate(${imageRotation}deg)` }} /> : null}
-            {!file ? <div className="yb-drop-state"><div className="yb-drop-icon"><Upload className="size-5" /></div><strong>{isDragging ? 'Release to upload' : 'Drop media here'}</strong><span>Video or image · up to 2GB</span></div> : null}
-            {isDragging ? <div className="yb-drag-overlay"><Upload className="size-6" /><span>Release to add source</span></div> : null}
-            {file && (isUploading || isProcessing) ? <div className="yb-processing-chip"><LoaderCircle className="size-3.5 animate-spin" /> {statusLabel}</div> : null}
-            {file && !isProcessing && !isUploading && !error ? <div className="yb-preview-chip"><Check className="size-3.5" /> {statusLabel}</div> : null}
-            {activeMediaUrl && isVideo ? <div className="yb-player-controls" aria-label="Video controls"><button type="button" className="yb-player-icon" onClick={togglePlayback} aria-label={isPlaying ? 'Pause video' : 'Play video'}>{isPlaying ? <Pause className="size-4" fill="currentColor" /> : <Play className="size-4" fill="currentColor" />}</button><span className="yb-player-time">{formatTime(currentTime)}</span><input className="yb-player-range yb-player-progress" type="range" min="0" max={duration || 0} step="0.1" value={Math.min(currentTime, duration || 0)} onChange={(event) => seek(Number(event.target.value))} aria-label="Video progress" /><span className="yb-player-time">{formatTime(duration)}</span><button type="button" className="yb-player-icon" onClick={toggleMute} aria-label={volume === 0 ? 'Unmute video' : 'Mute video'}>{volume === 0 ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}</button><input className="yb-player-range yb-volume-range" type="range" min="0" max="1" step="0.05" value={volume} onChange={(event) => updateVolume(Number(event.target.value))} aria-label="Video volume" /><select className="yb-player-speed" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (videoRef.current) videoRef.current.playbackRate = rate; }} aria-label="Playback speed"><option value="0.5">0.5×</option><option value="1">1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select><button type="button" className="yb-player-icon" onClick={toggleFullscreen} aria-label="Toggle fullscreen"><Maximize2 className="size-4" /></button></div> : null}
-            {activeMediaUrl && !isVideo ? <div className="yb-image-controls" aria-label="Image controls"><button type="button" className="yb-player-icon" onClick={() => setImageScale((scale) => Math.max(.5, scale - .25))} aria-label="Zoom out"><ZoomOut className="size-4" /></button><span>{Math.round(imageScale * 100)}%</span><button type="button" className="yb-player-icon" onClick={() => setImageScale((scale) => Math.min(3, scale + .25))} aria-label="Zoom in"><ZoomIn className="size-4" /></button><button type="button" className="yb-player-icon" onClick={() => setImageRotation((rotation) => rotation - 90)} aria-label="Rotate image left"><RotateCcw className="size-4" /></button><button type="button" className="yb-player-icon" onClick={() => setImageRotation((rotation) => rotation + 90)} aria-label="Rotate image right"><RotateCw className="size-4" /></button><button type="button" className="yb-player-icon" onClick={() => { setImageScale(1); setImageRotation(0); }} aria-label="Reset image view"><RotateCcw className="size-4" /></button></div> : null}
-            <div className="yb-stage-caption"><span>{file ? file.name : 'SOURCE PREVIEW'}</span><span>{file ? (isVideo ? 'VIDEO' : 'IMAGE') : 'READY'}</span></div>
-          </div>
-          <div className="yb-board-footer"><div className="yb-source-info">{file ? <><span className="yb-file-icon">{isVideo ? <FileVideo className="size-3.5" /> : <FileImage className="size-3.5" />}</span><span><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(1)} MB · {fileKind}</small></span></> : <><span className="yb-file-icon"><ImagePlus className="size-3.5" /></span><span><strong>No source selected</strong><small>Start with a local media file</small></span></>}</div><div className="yb-board-actions"><button className="yb-quiet-button" onClick={() => inputRef.current?.click()}><Upload className="size-3.5" /> Upload</button>{file ? <button className="yb-clear-button" onClick={clearWorkspace} aria-label="Clear workspace"><X className="size-3.5" /></button> : null}</div></div>
+          <MediaStage
+            key={activeMediaUrl ?? 'empty-stage'}
+            file={file}
+            activeMediaUrl={activeMediaUrl}
+            isVideo={isVideo}
+            isDragging={isDragging}
+            statusChip={hasSource && (isUploading || isProcessing) ? <div className="yb-processing-chip"><LoaderCircle className="size-3.5 animate-spin" aria-hidden /> {statusLabel}</div> : null}
+            onDragEnter={() => setIsDragging(true)}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={onDrop}
+            onBrowse={() => inputRef.current?.click()}
+          />
         </div>
 
-        <Link href="/library" className="yb-library-preview" aria-label="Open library"><div className="yb-library-heading"><div><span className="yb-kicker">Library preview</span><h2>Generated work</h2></div><span className="yb-library-arrow"><ArrowUpRight className="size-4" /></span></div><div className="yb-card-stack">{readyRenditions.length ? readyRenditions.slice(0, 3).map((rendition, index) => <div className={`yb-stack-card card-${index + 1}`} key={rendition.id}><span className="yb-stack-thumb">{objectUrl && !isVideo ? <img src={objectUrl} alt="" /> : <span className="yb-stack-gradient" />}</span><span className="yb-stack-label"><strong>{rendition.label}{!isVideo && 'px'}</strong><small>{file?.name || 'output'} </small></span></div>) : <div className="yb-stack-empty"><span className="yb-stack-ghost ghost-one" /><span className="yb-stack-ghost ghost-two" /><div><span className="yb-stack-empty-icon"><FileImage className="size-4" /></span><strong>Your outputs live here</strong><small>Generated renditions will collect in the library.</small></div></div>}</div><div className="yb-library-footer"><span>View full library</span><ChevronRight className="size-3.5" /></div></Link>
+        <Link href="/library" className="yb-library-card" aria-label="Open the library">
+          <div className="yb-library-heading">
+            <div><span className="yb-kicker">Library</span><h2>Generated work</h2></div>
+            <span className="yb-library-arrow"><ArrowUpRight className="size-4" aria-hidden /></span>
+          </div>
+          <div className="yb-card-stack">
+            {stackCards.length ? (
+              <>
+                {stackCards.slice(0, 4).map((rendition, index) => (
+                  <div
+                    className="yb-stack-card"
+                    key={rendition.id}
+                    style={{
+                      zIndex: 10 - index,
+                      ['--pile-y' as string]: `${index * 9}px`,
+                      ['--pile-scale' as string]: `${1 - index * 0.045}`,
+                      animationDelay: `${Math.min(index, 3) * 40}ms`,
+                    }}
+                  >
+                    <span className="yb-stack-thumb">
+                      {rendition.url ? <img src={rendition.url} alt="" /> : objectUrl && !isVideo ? <img src={objectUrl} alt="" /> : <span className="yb-stack-gradient" />}
+                    </span>
+                    <span className="yb-stack-label"><strong>{slideLabel(rendition)}</strong><small>{file?.name || seed?.fileName || 'output'}</small></span>
+                  </div>
+                ))}
+                {stackCards.length > 1 ? <span className="yb-stack-count">{stackCards.length} slides</span> : null}
+              </>
+            ) : (
+              <div className="yb-stack-empty">
+                <span className="yb-stack-ghost ghost-one" aria-hidden />
+                <span className="yb-stack-ghost ghost-two" aria-hidden />
+                <div>
+                  <span className="yb-stack-empty-icon"><FileImage className="size-4" aria-hidden /></span>
+                  <strong>Slides stack up here</strong>
+                  <small>Thumbnails and stills land in this pile as each rendition finishes.</small>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="yb-library-footer"><span>Open the library</span><ChevronRight className="size-3.5" aria-hidden /></div>
+        </Link>
       </section>
 
-      <footer className="yb-bottom-note"><span><span className="yb-note-dot" /> Drag & drop is active on the preview</span><span className="yb-footer-shortcut"><span>⌘</span><span>O</span> to upload</span></footer>
       <input ref={inputRef} type="file" accept="video/*,image/*" onChange={onFileChange} className="yb-visually-hidden" />
-    </main></AuthGate>
+    </main>
+  );
+}
+
+/** Suspense keeps the shell responsive while the session gate resolves. */
+export default function PreviewPage() {
+  return (
+    <AuthGate>
+      <Suspense fallback={null}>
+        <PreviewWorkspace />
+      </Suspense>
+    </AuthGate>
   );
 }
