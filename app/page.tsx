@@ -1,41 +1,41 @@
 'use client';
 
-import { ChangeEvent, DragEvent, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { AuthGate } from '@/components/auth/auth-gate';
 import { NavBar } from '@/components/nav-bar';
 import MediaStage from '@/components/workspace/media-stage';
 import { ArrowUpRight, ChevronRight, FileImage, LoaderCircle, Play, Upload, X } from 'lucide-react';
 import { toast } from 'sonner';
-import { createProject, getProjects, getRenditions, pollMediaUntilTerminal, uploadMedia, type Job, type Project, type Rendition as ApiRendition } from '@/lib/yellowbird-api';
+import { createProject, getProjects, type Project } from '@/lib/yellowbird-api';
 import { hasAuthToken } from '@/lib/auth/session';
-import { clearPreviewSelection, readPreviewSelection, saveLibraryItem, toLibraryRendition, updateLibraryItem, type LibraryItem } from '@/lib/workspace-store';
-
-type Rendition = ApiRendition & { label: string; detail: string; ready: boolean };
-
-function toUiRendition(rendition: ApiRendition): Rendition {
-  const label = rendition.type === 'transcode' && rendition.height ? `${rendition.height}p` : rendition.type === 'thumbnail' ? 'Poster' : 'Preview';
-  const detail = rendition.type === 'transcode' && rendition.height ? rendition.height === 1080 ? 'Full HD' : rendition.height === 720 ? 'HD' : 'SD' : rendition.type === 'thumbnail' ? 'Thumbnail' : '10 sec';
-  return { ...rendition, label, detail, ready: true };
-}
+import {
+  clearWorkspaceSession,
+  getWorkspaceFile,
+  getWorkspaceObjectUrl,
+  getWorkspaceSessionSnapshot,
+  resumeWorkspacePollingIfNeeded,
+  selectWorkspaceRendition,
+  startWorkspaceUpload,
+  subscribeWorkspaceSession,
+  type LibraryRendition,
+} from '@/lib/workspace-store';
 
 /** "720p" reads as "720p"; Poster/Preview stay as they are. */
-function slideLabel(rendition: Rendition) {
+function slideLabel(rendition: LibraryRendition) {
   return /\dp$/.test(rendition.label) ? `${rendition.label}` : rendition.label;
 }
 
+const EMPTY_RENDITIONS: LibraryRendition[] = [];
+
 function PreviewWorkspace() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const [file, setFile] = useState<File | null>(null);
-  const [objectUrl, setObjectUrl] = useState<string | null>(null);
-  const [renditions, setRenditions] = useState<Rendition[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const session = useSyncExternalStore(
+    subscribeWorkspaceSession,
+    getWorkspaceSessionSnapshot,
+    () => null
+  );
+
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -43,46 +43,105 @@ function PreviewWorkspace() {
   const [isProjectFormOpen, setIsProjectFormOpen] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [isCreatingProject, setIsCreatingProject] = useState(false);
-  const [seed, setSeed] = useState(() => readPreviewSelection());
+  const [isDragging, setIsDragging] = useState(false);
 
-  const isVideo = file ? (file.type ? file.type.startsWith('video/') : seed?.isVideo ?? true) : Boolean(seed?.url) && seed?.isVideo === true;
-  const readyRenditions = renditions.filter((rendition) => rendition.ready && (isVideo ? rendition.mime_type.startsWith('video/') : rendition.mime_type.startsWith('image/')));
-  const selectedRendition = readyRenditions.find((rendition) => rendition.id === selectedId) ?? readyRenditions[0];
-  const thumbRenditions = renditions.filter((rendition) => rendition.ready && rendition.mime_type.startsWith('image/'));
-  const activeMediaUrl = selectedRendition?.url || objectUrl || seed?.url || null;
-  const jobProgress = jobs.length ? Math.round(jobs.reduce((sum, job) => sum + job.progress, 0) / jobs.length) : 0;
-  const hasSource = Boolean(file || seed?.url);
-
-  useEffect(() => () => {
-    abortRef.current?.abort();
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-  }, [objectUrl]);
+  useEffect(() => {
+    resumeWorkspacePollingIfNeeded();
+  }, []);
 
   useEffect(() => {
     if (!hasAuthToken()) return;
-    getProjects().then((items) => {
-      setProjects(items);
-      setProjectId((current) => current && items.some((project) => project.id === current) ? current : items.length === 1 ? items[0].id : '');
-      setProjectLoadError(null);
-    }).catch((requestError) => {
-      setProjectLoadError(requestError instanceof Error ? requestError.message : 'Could not load projects.');
-    }).finally(() => setProjectsLoading(false));
-  }, []);
+    getProjects()
+      .then((items) => {
+        setProjects(items);
+        setProjectId((current) => {
+          if (current && items.some((p) => p.id === current)) return current;
+          if (session?.projectId && items.some((p) => p.id === session.projectId)) return session.projectId;
+          return items.length >= 1 ? items[0].id : '';
+        });
+        setProjectLoadError(null);
+      })
+      .catch((requestError) => {
+        setProjectLoadError(requestError instanceof Error ? requestError.message : 'Could not load projects.');
+      })
+      .finally(() => setProjectsLoading(false));
+  }, [session?.projectId]);
 
-  // Arriving from the library ("watch in preview") with no local source in hand.
-  useEffect(() => {
-    if (!seed) return;
-    getRenditions(seed.mediaId).then((items) => setRenditions(items.map(toUiRendition))).catch(() => setRenditions([]));
-  }, [seed]);
+  const file = getWorkspaceFile();
+  const objectUrl = getWorkspaceObjectUrl();
+  const renditions = session?.renditions ?? EMPTY_RENDITIONS;
+  const selectedId = session?.selectedRenditionId ?? null;
+  const isUploading = session?.status === 'uploading';
+  const isProcessing = session?.status === 'processing';
+  const uploadProgress = session?.uploadProgress ?? 0;
+  const jobs = session?.jobs ?? [];
 
-  const seedLibraryItem = (mediaId: string, name: string, kind: 'video' | 'image'): LibraryItem => ({
-    id: mediaId, fileName: name, kind, uploadedAt: new Date().toISOString(), status: 'processing', renditions: [],
-  });
+  const readyRenditions = useMemo(() => {
+    return renditions.filter((r) => r.ready !== false);
+  }, [renditions]);
+
+  const posterRendition = useMemo(() => {
+    return readyRenditions.find((r) => r.mime_type.startsWith('image/') || r.type === 'thumbnail') ?? null;
+  }, [readyRenditions]);
+
+  const selectedRendition = useMemo(() => {
+    if (selectedId) {
+      return readyRenditions.find((r) => r.id === selectedId) ?? null;
+    }
+    return null;
+  }, [readyRenditions, selectedId]);
+
+  const isCurrentMediaVideo = Boolean(
+    selectedRendition
+      ? selectedRendition.mime_type
+        ? selectedRendition.mime_type.startsWith('video/')
+        : selectedRendition.type !== 'thumbnail'
+      : file
+      ? file.type
+        ? file.type.startsWith('video/')
+        : !file.name.match(/\.(jpe?g|png|webp|gif|svg)$/i)
+      : session?.mimeType
+      ? session.mimeType.startsWith('video/')
+      : session?.kind
+      ? session.kind === 'video'
+      : true
+  );
+
+  const readyVideos = readyRenditions.filter((r) => r.mime_type.startsWith('video/'));
+  const activeMediaUrl =
+    selectedRendition?.url ||
+    objectUrl ||
+    (readyVideos.length > 0 && isCurrentMediaVideo ? readyVideos[0].url : null) ||
+    session?.sourceUrl ||
+    (readyRenditions[0]?.url ?? null);
+
+  const posterUrl = isCurrentMediaVideo ? (posterRendition?.url ?? null) : null;
+  const displayName = session?.fileName || file?.name || 'Source';
+  const hasSource = Boolean(file || activeMediaUrl || session?.mediaId);
+  const jobProgress = jobs.length ? Math.round(jobs.reduce((sum, job) => sum + job.progress, 0) / jobs.length) : 0;
+
+  const stackCards = useMemo(() => {
+    const thumbRenditions = renditions.filter((r) => r.ready !== false && r.mime_type.startsWith('image/'));
+    const nonThumbRenditions = renditions.filter((r) => r.ready !== false && !r.mime_type.startsWith('image/'));
+    const list = thumbRenditions.length > 0 ? thumbRenditions : nonThumbRenditions;
+    return list.slice().reverse();
+  }, [renditions]);
+
+  const statusLabel = useMemo(() => {
+    if (isUploading) return `Uploading ${uploadProgress}%`;
+    if (isProcessing) {
+      return readyRenditions.length ? `${readyRenditions.length} outputs · ${jobProgress}%` : `Processing · ${jobProgress}%`;
+    }
+    return 'Working';
+  }, [isProcessing, isUploading, jobProgress, readyRenditions.length, uploadProgress]);
 
   const submitProject = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const name = projectName.trim();
-    if (!name) { toast.error('Name your project first'); return; }
+    if (!name) {
+      toast.error('Name your project first');
+      return;
+    }
     setIsCreatingProject(true);
     try {
       const project = await createProject({ name });
@@ -94,8 +153,12 @@ function PreviewWorkspace() {
       toast.success('Project created', { description: `${project.name} is ready for uploads.` });
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : 'Could not create the project.';
-      toast.error('Could not create project', { description: message.includes('required') ? 'Enter a project name and try again.' : 'The project could not be created right now.' });
-    } finally { setIsCreatingProject(false); }
+      toast.error('Could not create project', {
+        description: message.includes('required') ? 'Enter a project name and try again.' : 'The project could not be created right now.',
+      });
+    } finally {
+      setIsCreatingProject(false);
+    }
   };
 
   const acceptFile = async (incoming: File) => {
@@ -109,55 +172,15 @@ function PreviewWorkspace() {
       toast.error('Authentication required', { description: 'Sign in before uploading media.' });
       return;
     }
-    abortRef.current?.abort();
-    const activeProjectId = projectId;
+
+    const activeProjectId = projectId || (projects.length >= 1 ? projects[0].id : '');
     if (!activeProjectId) {
       const description = projectLoadError ? 'Check your connection and try again.' : projectsLoading ? 'Wait a moment for your projects to load.' : 'Every upload belongs to a project.';
       toast.error(projectLoadError ? 'Could not load projects' : 'Project required', { description });
       return;
     }
 
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-    const nextUrl = URL.createObjectURL(incoming);
-    clearPreviewSelection();
-    setSeed(null);
-    setFile(incoming);
-    setObjectUrl(nextUrl);
-    setRenditions([]);
-    setSelectedId(null);
-    setIsUploading(true);
-    setUploadProgress(0);
-    setIsProcessing(false);
-    setJobs([]);
-
-    const kind = incoming.type.startsWith('video/') ? 'video' : 'image';
-    const uploadToast = toast.loading('Uploading source…', { description: incoming.name });
-    try {
-      const media = await uploadMedia(activeProjectId, incoming, setUploadProgress);
-      setIsUploading(false);
-      setIsProcessing(true);
-      saveLibraryItem(seedLibraryItem(media.id, incoming.name, kind));
-      toast.success('Upload received', { id: uploadToast, description: 'The backend queued your rendition jobs.' });
-      const controller = new AbortController();
-      abortRef.current = controller;
-      const result = await pollMediaUntilTerminal(media.id, (nextMedia, nextJobs, nextRenditions) => {
-        setJobs(nextJobs);
-        const mapped = nextRenditions.map(toUiRendition);
-        setRenditions(mapped);
-        updateLibraryItem(media.id, { status: nextMedia.status === 'ready' ? 'ready' : nextMedia.status === 'failed' ? 'failed' : 'processing', renditions: nextRenditions.map(toLibraryRendition) });
-        if (!selectedId && mapped[0]) setSelectedId(mapped[0].id);
-      }, controller.signal);
-      setIsProcessing(false);
-      setRenditions(result.renditions.map(toUiRendition));
-      updateLibraryItem(media.id, { status: 'ready', renditions: result.renditions.map(toLibraryRendition) });
-      if (!selectedId && result.renditions[0]) setSelectedId(result.renditions[0].id);
-      toast.success('Renditions ready', { description: `${result.renditions.length} outputs are waiting in the library.` });
-    } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : 'The backend could not process this media.';
-      setIsUploading(false); setIsProcessing(false);
-      if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
-      toast.error('Processing failed', { id: uploadToast, description: message });
-    }
+    await startWorkspaceUpload(activeProjectId, incoming);
   };
 
   const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -174,60 +197,112 @@ function PreviewWorkspace() {
   };
 
   const clearWorkspace = () => {
-    abortRef.current?.abort();
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-    clearPreviewSelection();
-    setFile(null); setObjectUrl(null); setRenditions([]); setSelectedId(null); setIsProcessing(false); setIsUploading(false); setUploadProgress(0); setJobs([]);
-    setSeed(null);
+    clearWorkspaceSession();
+    toast('Workspace cleared');
   };
-
-  const statusLabel = useMemo(() => {
-    if (isUploading) return `Uploading ${uploadProgress}%`;
-    if (isProcessing) return readyRenditions.length ? `${readyRenditions.length} outputs · ${jobProgress}%` : `Processing · ${jobProgress}%`;
-    return 'Working';
-  }, [isProcessing, isUploading, jobProgress, readyRenditions.length, uploadProgress]);
-
-  const stackCards = (isVideo ? thumbRenditions : readyRenditions).slice().reverse();
 
   return (
     <main className="yb-shell">
       <NavBar />
 
       <section className="yb-strip">
-        <div className="yb-output-label"><span className="yb-kicker">Outputs</span><span className="yb-count">{readyRenditions.length}/{renditions.length || '—'}</span></div>
+        <div className="yb-output-label">
+          <span className="yb-kicker">Outputs</span>
+          <span className="yb-count">{readyRenditions.length}/{renditions.length || '—'}</span>
+        </div>
         <div className="yb-rendition-rail">
-          {readyRenditions.length ? readyRenditions.map((rendition) => (
-            <button key={rendition.id} className={`yb-rendition-frame ${selectedRendition?.id === rendition.id ? 'is-selected' : ''}`} onClick={() => setSelectedId(rendition.id)}>
-              <span className="yb-frame-image">
-                {rendition.mime_type.startsWith('image/') && rendition.url ? <img src={rendition.url} alt="" /> : null}
-                {isVideo ? <span className="yb-frame-play"><Play className="size-2.5" fill="currentColor" aria-hidden /></span> : null}
-              </span>
-              <span className="yb-frame-label"><strong>{slideLabel(rendition)}</strong><small>{rendition.detail}</small></span>
-            </button>
-          )) : <div className="yb-rail-empty">{hasSource && (isProcessing || isUploading) ? <><LoaderCircle className="size-3.5 animate-spin" /> Building outputs</> : 'Outputs will appear here'}</div>}
+          {readyRenditions.length ? (
+            readyRenditions.map((rendition) => {
+              const isSelected = selectedRendition ? selectedRendition.id === rendition.id : false;
+              const isRenditionVideo = rendition.mime_type ? rendition.mime_type.startsWith('video/') : rendition.type !== 'thumbnail';
+              return (
+                <button
+                  key={rendition.id}
+                  type="button"
+                  className={`yb-rendition-frame ${isSelected ? 'is-selected' : ''}`}
+                  onClick={() => selectWorkspaceRendition(rendition.id)}
+                >
+                  <span className="yb-frame-image">
+                    {rendition.mime_type.startsWith('image/') && rendition.url ? (
+                      <img src={rendition.url} alt="" />
+                    ) : posterRendition?.url ? (
+                      <img src={posterRendition.url} alt="" />
+                    ) : null}
+                    {isRenditionVideo ? (
+                      <span className="yb-frame-play"><Play className="size-2.5" fill="currentColor" aria-hidden /></span>
+                    ) : null}
+                  </span>
+                  <span className="yb-frame-label">
+                    <strong>{slideLabel(rendition)}</strong>
+                    <small>{rendition.detail}</small>
+                  </span>
+                </button>
+              );
+            })
+          ) : (
+            <div className="yb-rail-empty">
+              {hasSource && (isProcessing || isUploading) ? (
+                <><LoaderCircle className="size-3.5 animate-spin" /> Building outputs</>
+              ) : (
+                'Outputs will appear here'
+              )}
+            </div>
+          )}
         </div>
         <div className="yb-project-control">
           {projects.length > 1 ? (
-            <label><span>Project</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} aria-label="Select project"><option value="" disabled>Select project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+            <label>
+              <span>Project</span>
+              <select value={projectId} onChange={(event) => setProjectId(event.target.value)} aria-label="Select project">
+                <option value="" disabled>Select project</option>
+                {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
+            </label>
           ) : projects.length === 1 ? (
             <span className="yb-project-selected"><span>Project</span><strong>{projects[0].name}</strong></span>
           ) : (
-            <button type="button" className="yb-project-create-link" onClick={() => setIsProjectFormOpen(true)} disabled={projectsLoading}>{projectsLoading ? 'Loading…' : 'Create project'}</button>
+            <button type="button" className="yb-project-create-link" onClick={() => setIsProjectFormOpen(true)} disabled={projectsLoading}>
+              {projectsLoading ? 'Loading…' : 'Create project'}
+            </button>
           )}
         </div>
-        {hasSource ? <button type="button" className="yb-ghost-button" onClick={clearWorkspace} aria-label="Clear workspace"><X className="size-3.5" /> Clear</button> : null}
-        <button className="yb-upload-primary" onClick={() => inputRef.current?.click()}><Upload className="size-4" aria-hidden /> Upload media</button>
+        {hasSource ? (
+          <button type="button" className="yb-ghost-button" onClick={clearWorkspace} aria-label="Clear workspace">
+            <X className="size-3.5" /> Clear
+          </button>
+        ) : null}
+        <button className="yb-upload-primary" onClick={() => inputRef.current?.click()}>
+          <Upload className="size-4" aria-hidden /> Upload media
+        </button>
       </section>
 
-      {isProjectFormOpen ? <div className="yb-project-dialog-layer" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setIsProjectFormOpen(false); }}><div className="yb-project-dialog" role="dialog" aria-modal="true" aria-labelledby="project-dialog-title"><button type="button" className="yb-project-dialog-close" onClick={() => setIsProjectFormOpen(false)} aria-label="Close project creation"><X className="size-4" /></button><span className="yb-kicker">New project</span><h2 id="project-dialog-title">Where should this work live?</h2><p>Give your uploads a home before you begin.</p><form className="yb-project-form" onSubmit={submitProject}><label htmlFor="project-name">Project name</label><input id="project-name" autoFocus value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="e.g. Client films" maxLength={255} /><div className="yb-project-dialog-actions"><button type="button" onClick={() => setIsProjectFormOpen(false)}>Cancel</button><button type="submit" disabled={isCreatingProject}>{isCreatingProject ? <LoaderCircle className="size-3.5 animate-spin" /> : 'Create project'}</button></div></form></div></div> : null}
+      {isProjectFormOpen ? (
+        <div className="yb-project-dialog-layer" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setIsProjectFormOpen(false); }}>
+          <div className="yb-project-dialog" role="dialog" aria-modal="true" aria-labelledby="project-dialog-title">
+            <button type="button" className="yb-project-dialog-close" onClick={() => setIsProjectFormOpen(false)} aria-label="Close project creation"><X className="size-4" /></button>
+            <span className="yb-kicker">New project</span>
+            <h2 id="project-dialog-title">Where should this work live?</h2>
+            <p>Give your uploads a home before you begin.</p>
+            <form className="yb-project-form" onSubmit={submitProject}>
+              <label htmlFor="project-name">Project name</label>
+              <input id="project-name" autoFocus value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="e.g. Client films" maxLength={255} />
+              <div className="yb-project-dialog-actions">
+                <button type="button" onClick={() => setIsProjectFormOpen(false)}>Cancel</button>
+                <button type="submit" disabled={isCreatingProject}>{isCreatingProject ? <LoaderCircle className="size-3.5 animate-spin" /> : 'Create project'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
 
       <section className="yb-workbench">
         <div className="yb-board-shell">
           <MediaStage
-            key={activeMediaUrl ?? 'empty-stage'}
             file={file}
+            fileName={displayName}
             activeMediaUrl={activeMediaUrl}
-            isVideo={isVideo}
+            isVideo={isCurrentMediaVideo}
+            posterUrl={posterUrl}
             isDragging={isDragging}
             statusChip={hasSource && (isUploading || isProcessing) ? <div className="yb-processing-chip"><LoaderCircle className="size-3.5 animate-spin" aria-hidden /> {statusLabel}</div> : null}
             onDragEnter={() => setIsDragging(true)}
@@ -247,7 +322,8 @@ function PreviewWorkspace() {
             {stackCards.length ? (
               <>
                 {stackCards.slice(0, 4).map((rendition, index) => (
-                  <div
+                  <button
+                    type="button"
                     className="yb-stack-card"
                     key={rendition.id}
                     style={{
@@ -256,12 +332,27 @@ function PreviewWorkspace() {
                       ['--pile-scale' as string]: `${1 - index * 0.045}`,
                       animationDelay: `${Math.min(index, 3) * 40}ms`,
                     }}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      selectWorkspaceRendition(rendition.id);
+                    }}
+                    title={`View ${slideLabel(rendition)}`}
                   >
                     <span className="yb-stack-thumb">
-                      {rendition.url ? <img src={rendition.url} alt="" /> : objectUrl && !isVideo ? <img src={objectUrl} alt="" /> : <span className="yb-stack-gradient" />}
+                      {rendition.url ? (
+                        <img src={rendition.url} alt="" />
+                      ) : objectUrl && !isCurrentMediaVideo ? (
+                        <img src={objectUrl} alt="" />
+                      ) : (
+                        <span className="yb-stack-gradient" />
+                      )}
                     </span>
-                    <span className="yb-stack-label"><strong>{slideLabel(rendition)}</strong><small>{file?.name || seed?.fileName || 'output'}</small></span>
-                  </div>
+                    <span className="yb-stack-label">
+                      <strong>{slideLabel(rendition)}</strong>
+                      <small>{displayName}</small>
+                    </span>
+                  </button>
                 ))}
                 {stackCards.length > 1 ? <span className="yb-stack-count">{stackCards.length} slides</span> : null}
               </>

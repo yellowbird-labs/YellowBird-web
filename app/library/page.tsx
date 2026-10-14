@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import { AuthGate } from '@/components/auth/auth-gate';
 import { NavBar } from '@/components/nav-bar';
 import { ArrowUpRight, Film, Images, Play, Sparkles, Upload } from 'lucide-react';
-import { getLibrarySnapshot, subscribeLibrary, writePreviewSelection, type LibraryItem, type LibraryRendition } from '@/lib/workspace-store';
+import { getLibrarySnapshot, subscribeLibrary, setWorkspaceFromLibrary, type LibraryItem, type LibraryRendition } from '@/lib/workspace-store';
 import { useSyncExternalStore } from 'react';
 
 function relativeTime(iso: string) {
@@ -67,13 +67,7 @@ export function LibraryWorkspace() {
   }, [items]);
 
   const watch = (item: LibraryItem, rendition: LibraryRendition) => {
-    writePreviewSelection({
-      mediaId: item.id,
-      url: rendition.url,
-      isVideo: rendition.mime_type.startsWith('video/'),
-      label: rendition.label,
-      fileName: item.fileName,
-    });
+    setWorkspaceFromLibrary(item, rendition);
     router.push('/');
   };
 

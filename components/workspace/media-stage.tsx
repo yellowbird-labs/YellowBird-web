@@ -4,9 +4,11 @@ import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { Maximize, Minimize, Pause, Play, RotateCcw, RotateCw, Upload, Volume2, VolumeX, ZoomIn, ZoomOut } from 'lucide-react';
 
 type MediaStageProps = {
-  file: File | null;
+  file?: File | null;
+  fileName?: string | null;
   activeMediaUrl: string | null;
   isVideo: boolean;
+  posterUrl?: string | null;
   isDragging: boolean;
   statusChip: ReactNode | null;
   onDragEnter: () => void;
@@ -101,7 +103,7 @@ function Slider({
 }
 
 export default function MediaStage({
-  file, activeMediaUrl, isVideo, isDragging, statusChip,
+  file, fileName, activeMediaUrl, isVideo, posterUrl, isDragging, statusChip,
   onDragEnter, onDragOver, onDragLeave, onDrop, onBrowse,
 }: MediaStageProps) {
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -120,8 +122,22 @@ export default function MediaStage({
   const [imageScale, setImageScale] = useState(1);
   const [imageRotation, setImageRotation] = useState(0);
 
+  const hasMedia = Boolean(activeMediaUrl);
   const hasVideo = Boolean(activeMediaUrl && isVideo);
   const hasImage = Boolean(activeMediaUrl && !isVideo);
+  const displayName = fileName || file?.name || 'Source';
+
+  const [prevMediaUrl, setPrevMediaUrl] = useState(activeMediaUrl);
+  const [prevIsVideo, setPrevIsVideo] = useState(isVideo);
+  if (prevMediaUrl !== activeMediaUrl || prevIsVideo !== isVideo) {
+    setPrevMediaUrl(activeMediaUrl);
+    setPrevIsVideo(isVideo);
+    setImageScale(1);
+    setImageRotation(0);
+    setCurrentTime(0);
+    setBufferedRatio(0);
+    setIsPlaying(false);
+  }
 
   const togglePlayback = useCallback(async () => {
     const video = videoRef.current;
@@ -229,7 +245,7 @@ export default function MediaStage({
   // controls hide only while playing and the pointer has been still
   const controlsHidden = isPlaying && controlsIdle;
 
-  const stageClass = `yb-media-stage${isDragging ? ' is-dragging' : ''}${file ? ' has-media' : ''}${controlsHidden ? ' is-idle' : ''}`;
+  const stageClass = `yb-media-stage${isDragging ? ' is-dragging' : ''}${hasMedia ? ' has-media' : ''}${controlsHidden ? ' is-idle' : ''}`;
 
   return (
     <div
@@ -241,14 +257,16 @@ export default function MediaStage({
       onDrop={onDrop}
       onPointerMove={hasVideo ? wakeControls : undefined}
     >
-      {activeMediaUrl && isVideo ? (
+      {hasVideo && activeMediaUrl ? (
         <video
           key={activeMediaUrl}
           ref={videoRef}
           src={activeMediaUrl}
+          poster={posterUrl ?? undefined}
           className="yb-media-content is-video"
           preload="metadata"
-          aria-label={`${file?.name ?? 'Source'} preview`}
+          playsInline
+          aria-label={`${displayName} preview`}
           onClick={togglePlayback}
           onLoadedMetadata={(event) => {
             const video = event.currentTarget;
@@ -263,19 +281,21 @@ export default function MediaStage({
           onPlay={onPlayStarted}
           onPause={onPlaybackPaused}
           onEnded={onPlaybackPaused}
+          onError={() => setIsPlaying(false)}
         />
       ) : null}
 
-      {activeMediaUrl && !isVideo ? (
+      {hasImage && activeMediaUrl ? (
         <img
+          key={activeMediaUrl}
           src={activeMediaUrl}
-          alt={`${file?.name ?? 'Source'} preview`}
+          alt={`${displayName} preview`}
           className="yb-media-content yb-image-content"
           style={{ transform: `scale(${imageScale}) rotate(${imageRotation}deg)` }}
         />
       ) : null}
 
-      {!file ? (
+      {!hasMedia ? (
         <div className="yb-drop-state">
           <div className="yb-drop-icon"><Upload className="size-5" aria-hidden /></div>
           <strong>{isDragging ? 'Release to upload' : 'Drop media here'}</strong>
@@ -354,7 +374,7 @@ export default function MediaStage({
         </div>
       ) : null}
 
-      {file ? <div className="yb-stage-caption">{file.name}</div> : null}
+      {hasMedia && displayName ? <div className="yb-stage-caption">{displayName}</div> : null}
     </div>
   );
 }
