@@ -1,13 +1,21 @@
 'use client';
 
-import { Suspense, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { AuthGate } from '@/components/auth/auth-gate';
 import { NavBar } from '@/components/nav-bar';
-import { ArrowUpRight, Film, Images, Play, Sparkles, Upload } from 'lucide-react';
-import { getLibrarySnapshot, subscribeLibrary, setWorkspaceFromLibrary, type LibraryItem, type LibraryRendition } from '@/lib/workspace-store';
-import { useSyncExternalStore } from 'react';
+import { ArrowUpRight, Film, Images, LoaderCircle, Play, RefreshCw, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import {
+  deleteLibraryRendition,
+  getLibrarySnapshot,
+  setWorkspaceFromLibrary,
+  subscribeLibrary,
+  syncLibraryFromApi,
+  type LibraryItem,
+  type LibraryRendition,
+} from '@/lib/workspace-store';
+import { toast } from 'sonner';
 
 function relativeTime(iso: string) {
   const delta = Date.now() - new Date(iso).getTime();
@@ -32,10 +40,50 @@ function heightOf(rendition: LibraryRendition) {
   return rendition.height ?? (rendition.type === 'preview' ? 1 : 0);
 }
 
+interface DeleteTarget {
+  id: string;
+  mediaId: string;
+  label: string;
+  detail: string;
+  fileName: string;
+}
+
 export function LibraryWorkspace() {
   const router = useRouter();
   const items = useSyncExternalStore(subscribeLibrary, getLibrarySnapshot, () => [] as LibraryItem[]);
   const [headingMediaId, setHeadingMediaId] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(true);
+  const [renditionToDelete, setRenditionToDelete] = useState<DeleteTarget | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  useEffect(() => {
+    syncLibraryFromApi().finally(() => setSyncing(false));
+  }, []);
+
+  const handleRefresh = async () => {
+    setSyncing(true);
+    try {
+      await syncLibraryFromApi();
+      toast.success('Library synced with server');
+    } catch {
+      toast.error('Could not sync library');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const confirmDeleteRendition = async () => {
+    if (!renditionToDelete) return;
+    setIsDeleting(true);
+    try {
+      await deleteLibraryRendition(renditionToDelete.id, renditionToDelete.mediaId);
+      setRenditionToDelete(null);
+    } catch {
+      // toast already fired inside deleteLibraryRendition
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   const videoRenditions = useMemo(() => {
     const pairs: Array<{ item: LibraryItem; rendition: LibraryRendition }> = [];
@@ -83,8 +131,21 @@ export function LibraryWorkspace() {
           <span className="yb-kicker">Library</span>
           <h1>Everything you have rendered</h1>
         </div>
-        <div>
-          <Link className="yb-ghost-button" href="/"><Upload className="size-3.5" aria-hidden /> New source</Link>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            type="button"
+            className="yb-ghost-button"
+            onClick={handleRefresh}
+            disabled={syncing}
+            title="Sync library from server"
+            aria-label="Sync library from server"
+          >
+            <RefreshCw className={`size-3.5 ${syncing ? 'animate-spin' : ''}`} aria-hidden />
+            {syncing ? 'Syncing…' : 'Sync'}
+          </button>
+          <Link className="yb-ghost-button" href="/">
+            <Upload className="size-3.5" aria-hidden /> New source
+          </Link>
         </div>
       </header>
 
@@ -120,13 +181,53 @@ export function LibraryWorkspace() {
                 <span className="yb-tile-glyph"><Play className="size-4" fill="currentColor" aria-hidden /></span>
                 <span className="yb-tile-badge">{feature.best.label}</span>
                 {formatDuration(feature.best.duration_seconds) ? <span className="yb-tile-duration">{formatDuration(feature.best.duration_seconds)}</span> : null}
+                <button
+                  type="button"
+                  className="yb-tile-delete"
+                  title={`Delete ${feature.best.label} rendition`}
+                  aria-label={`Delete ${feature.best.label} rendition`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRenditionToDelete({
+                      id: feature.best.id,
+                      mediaId: feature.item.id,
+                      label: feature.best.label,
+                      detail: feature.best.detail,
+                      fileName: feature.item.fileName,
+                    });
+                  }}
+                >
+                  <Trash2 className="size-3.5" aria-hidden />
+                </button>
               </div>
               <div className="yb-feature-body">
                 <h3>{feature.item.fileName}</h3>
                 <p>Highest quality output from this source, {relativeTime(feature.item.uploadedAt)}. Pick any rung of the ladder — each one opens in the preview player.</p>
                 <div className="yb-feature-actions">
                   {feature.ladder.map((rendition) => (
-                    <button key={rendition.id} type="button" className="yb-ghost-button" onClick={() => watch(feature.item, rendition)}>{rendition.label}</button>
+                    <div key={rendition.id} className="yb-ladder-chip">
+                      <button type="button" className="yb-ghost-button" onClick={() => watch(feature.item, rendition)}>
+                        {rendition.label}
+                      </button>
+                      <button
+                        type="button"
+                        className="yb-ladder-delete"
+                        title={`Delete ${rendition.label} rendition`}
+                        aria-label={`Delete ${rendition.label} rendition`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRenditionToDelete({
+                            id: rendition.id,
+                            mediaId: feature.item.id,
+                            label: rendition.label,
+                            detail: rendition.detail,
+                            fileName: feature.item.fileName,
+                          });
+                        }}
+                      >
+                        <Trash2 className="size-3" aria-hidden />
+                      </button>
+                    </div>
                   ))}
                 </div>
                 <div className="yb-feature-actions">
@@ -149,15 +250,50 @@ export function LibraryWorkspace() {
               {videoRenditions.length ? (
                 <div className="yb-card-grid" style={{ marginTop: 14 }}>
                   {videoRenditions.map(({ item, rendition }) => (
-                    <button key={rendition.id} type="button" className="yb-media-card" onClick={() => watch(item, rendition)}>
+                    <div
+                      key={rendition.id}
+                      role="button"
+                      tabIndex={0}
+                      className="yb-media-card"
+                      onClick={() => watch(item, rendition)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          watch(item, rendition);
+                        }
+                      }}
+                    >
                       <span className="yb-media-tile">
-                        {item.renditions.find((thumb) => thumb.mime_type.startsWith('image/'))?.url ? <img src={item.renditions.find((thumb) => thumb.mime_type.startsWith('image/'))!.url} alt="" /> : null}
+                        {item.renditions.find((thumb) => thumb.mime_type.startsWith('image/'))?.url ? (
+                          <img src={item.renditions.find((thumb) => thumb.mime_type.startsWith('image/'))!.url} alt="" />
+                        ) : null}
                         <span className="yb-tile-glyph"><Play className="size-4" fill="currentColor" aria-hidden /></span>
                         <span className="yb-tile-badge">{rendition.label}</span>
                         {formatDuration(rendition.duration_seconds) ? <span className="yb-tile-duration">{formatDuration(rendition.duration_seconds)}</span> : null}
+                        <button
+                          type="button"
+                          className="yb-tile-delete"
+                          title={`Delete ${rendition.label} rendition`}
+                          aria-label={`Delete ${rendition.label} rendition`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRenditionToDelete({
+                              id: rendition.id,
+                              mediaId: item.id,
+                              label: rendition.label,
+                              detail: rendition.detail,
+                              fileName: item.fileName,
+                            });
+                          }}
+                        >
+                          <Trash2 className="size-3.5" aria-hidden />
+                        </button>
                       </span>
-                      <span className="yb-media-meta"><strong>{item.fileName}</strong><small>{rendition.detail}</small></span>
-                    </button>
+                      <span className="yb-media-meta">
+                        <strong>{item.fileName}</strong>
+                        <small>{rendition.detail}</small>
+                      </span>
+                    </div>
                   ))}
                 </div>
               ) : (
@@ -177,13 +313,46 @@ export function LibraryWorkspace() {
               {imageRenditions.length ? (
                 <div className="yb-card-grid" style={{ marginTop: 14 }}>
                   {imageRenditions.map(({ item, rendition }) => (
-                    <button key={rendition.id} type="button" className="yb-media-card" onClick={() => watch(item, rendition)}>
+                    <div
+                      key={rendition.id}
+                      role="button"
+                      tabIndex={0}
+                      className="yb-media-card"
+                      onClick={() => watch(item, rendition)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          watch(item, rendition);
+                        }
+                      }}
+                    >
                       <span className="yb-media-tile">
                         <img src={rendition.url} alt="" />
                         <span className="yb-tile-badge">{rendition.label}</span>
+                        <button
+                          type="button"
+                          className="yb-tile-delete"
+                          title={`Delete ${rendition.label} thumbnail`}
+                          aria-label={`Delete ${rendition.label} thumbnail`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRenditionToDelete({
+                              id: rendition.id,
+                              mediaId: item.id,
+                              label: rendition.label,
+                              detail: rendition.detail,
+                              fileName: item.fileName,
+                            });
+                          }}
+                        >
+                          <Trash2 className="size-3.5" aria-hidden />
+                        </button>
                       </span>
-                      <span className="yb-media-meta"><strong>{item.fileName}</strong><small>{rendition.detail}</small></span>
-                    </button>
+                      <span className="yb-media-meta">
+                        <strong>{item.fileName}</strong>
+                        <small>{rendition.detail}</small>
+                      </span>
+                    </div>
                   ))}
                 </div>
               ) : (
@@ -195,6 +364,12 @@ export function LibraryWorkspace() {
               )}
             </section>
           </>
+        ) : syncing ? (
+          <div className="yb-section-empty" style={{ minHeight: 280 }}>
+            <LoaderCircle className="size-6 animate-spin" aria-hidden />
+            <strong>Syncing your library…</strong>
+            <span>Retrieving generated renditions and media from server.</span>
+          </div>
         ) : (
           <div className="yb-section-empty" style={{ minHeight: 280 }}>
             <Sparkles className="size-5" aria-hidden />
@@ -204,6 +379,51 @@ export function LibraryWorkspace() {
           </div>
         )}
       </div>
+
+      {renditionToDelete ? (
+        <div
+          className="yb-project-dialog-layer"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !isDeleting) setRenditionToDelete(null);
+          }}
+        >
+          <div className="yb-project-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-rendition-title">
+            <button
+              type="button"
+              className="yb-project-dialog-close"
+              onClick={() => setRenditionToDelete(null)}
+              disabled={isDeleting}
+              aria-label="Close delete dialog"
+            >
+              <X className="size-4" />
+            </button>
+            <span className="yb-kicker" style={{ color: 'var(--danger)' }}>Delete output</span>
+            <h2 id="delete-rendition-title">Delete {renditionToDelete.label} rendition?</h2>
+            <p>
+              This will permanently delete the {renditionToDelete.detail} output for &ldquo;{renditionToDelete.fileName}&rdquo; from storage and the database.
+            </p>
+            <div className="yb-project-dialog-actions">
+              <button type="button" onClick={() => setRenditionToDelete(null)} disabled={isDeleting}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteRendition}
+                disabled={isDeleting}
+                style={{
+                  background: 'var(--danger)',
+                  color: '#ffffff',
+                  borderColor: 'var(--danger)',
+                }}
+              >
+                {isDeleting ? <LoaderCircle className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+                {isDeleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

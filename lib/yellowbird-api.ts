@@ -30,9 +30,12 @@ export function registerUser(input: RegisterInput) { return request<AuthUser>('/
 export async function loginUser(input: LoginInput) { const session = await request<AuthSession>('/users/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }, false); setSession(session); return session; }
 export function getProjects() { return request<Project[]>('/projects'); }
 export function createProject(input: { name: string; description?: string }) { return request<Project>('/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }); }
+export function listMedia(projectId: string, signal?: AbortSignal) { return request<Media[]>(`/media?project_id=${encodeURIComponent(projectId)}`, { signal }); }
 export function getMedia(mediaId: string, signal?: AbortSignal) { return request<Media>(`/media/${mediaId}`, { signal }); }
+export function deleteMedia(mediaId: string) { return request<void>(`/media/${encodeURIComponent(mediaId)}`, { method: 'DELETE' }); }
 export function getJobs(mediaId: string, signal?: AbortSignal) { return request<Job[]>(`/jobs?media_id=${encodeURIComponent(mediaId)}`, { signal }); }
 export function getRenditions(mediaId: string, signal?: AbortSignal) { return request<Rendition[]>(`/renditions?media_id=${encodeURIComponent(mediaId)}`, { signal }); }
+export function deleteRendition(renditionId: string) { return request<void>(`/renditions/${encodeURIComponent(renditionId)}`, { method: 'DELETE' }); }
 
 export function uploadMedia(projectId: string, file: File, onProgress?: (value: number) => void) {
   return new Promise<Media>((resolve, reject) => {
@@ -48,12 +51,46 @@ export function uploadMedia(projectId: string, file: File, onProgress?: (value: 
 
 export async function pollMediaUntilTerminal(mediaId: string, onUpdate: (media: Media, jobs: Job[], renditions: Rendition[]) => void, signal?: AbortSignal) {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 180_000) {
+  const MAX_POLL_DURATION_MS = 900_000; // 15 minutes to accommodate sequential transcodes on single-worker compute
+  let lastMedia: Media | null = null;
+  let lastJobs: Job[] = [];
+  let lastRenditions: Rendition[] = [];
+
+  while (Date.now() - startedAt < MAX_POLL_DURATION_MS) {
     if (signal?.aborted) throw new DOMException('Polling cancelled', 'AbortError');
-    const [media, jobs, renditions] = await Promise.all([getMedia(mediaId, signal), getJobs(mediaId, signal), getRenditions(mediaId, signal)]); onUpdate(media, jobs, renditions);
+    const [media, jobs, renditions] = await Promise.all([getMedia(mediaId, signal), getJobs(mediaId, signal), getRenditions(mediaId, signal)]);
+    lastMedia = media;
+    lastJobs = jobs;
+    lastRenditions = renditions;
+    onUpdate(media, jobs, renditions);
+
     if (media.status === 'ready') return { media, jobs, renditions };
-    if (media.status === 'failed' || jobs.some((job) => job.status === 'failed')) throw new Error(jobs.find((job) => job.error)?.error || 'Media processing failed.');
-    await new Promise((resolve, reject) => { const timeout = setTimeout(resolve, 2000); signal?.addEventListener('abort', () => { clearTimeout(timeout); reject(new DOMException('Polling cancelled', 'AbortError')); }, { once: true }); });
+
+    // If all jobs finished or failed
+    const hasPendingJobs = jobs.some((job) => job.status === 'queued' || job.status === 'running');
+    if (!hasPendingJobs && jobs.length > 0) {
+      if (jobs.every((job) => job.status === 'failed')) {
+        throw new Error(jobs.find((job) => job.error)?.error || 'All rendition jobs failed.');
+      }
+      if (renditions.length > 0) {
+        return { media: { ...media, status: 'ready' }, jobs, renditions };
+      }
+    }
+
+    if (media.status === 'failed' && renditions.length === 0) {
+      throw new Error(jobs.find((job) => job.error)?.error || 'Media processing failed.');
+    }
+
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(resolve, 2500);
+      signal?.addEventListener('abort', () => { clearTimeout(timeout); reject(new DOMException('Polling cancelled', 'AbortError')); }, { once: true });
+    });
   }
-  throw new Error('Media processing timed out after 180 seconds.');
+
+  // If timeout expired but we have rendered outputs, preserve them
+  if (lastRenditions.length > 0 && lastMedia) {
+    return { media: { ...lastMedia, status: 'ready' }, jobs: lastJobs, renditions: lastRenditions };
+  }
+
+  throw new Error('Media processing timed out. The worker is still processing tasks in the queue; please check back shortly.');
 }

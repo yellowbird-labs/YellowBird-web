@@ -4,9 +4,14 @@ import {
   uploadMedia,
   pollMediaUntilTerminal,
   getRenditions,
+  getProjects,
+  listMedia,
+  deleteRendition,
   type Job,
+  type Media,
   type Rendition,
 } from '@/lib/yellowbird-api';
+import { hasAuthToken } from '@/lib/auth/session';
 import { toast } from 'sonner';
 
 export type LibraryRendition = Rendition & { label: string; detail: string; ready: boolean };
@@ -133,6 +138,115 @@ export function updateLibraryItem(mediaId: string, patch: Partial<Omit<LibraryIt
   if (index === -1) return;
   items[index] = { ...items[index], ...patch };
   writeLibraryItems(items);
+}
+
+export async function deleteLibraryRendition(renditionId: string, mediaId?: string): Promise<void> {
+  const items = readLibraryItems();
+  let targetMediaId = mediaId;
+
+  // 1. Optimistically update local library items
+  const updatedItems = items.map((item) => {
+    const hasRendition = item.renditions.some((r) => r.id === renditionId);
+    if (hasRendition) {
+      targetMediaId = item.id;
+      return {
+        ...item,
+        renditions: item.renditions.filter((r) => r.id !== renditionId),
+      };
+    }
+    return item;
+  });
+  writeLibraryItems(updatedItems);
+
+  // 2. Update workspace session if active session is using this rendition
+  const currentSession = getWorkspaceSessionSnapshot();
+  if (currentSession && (currentSession.selectedRenditionId === renditionId || currentSession.renditions.some((r) => r.id === renditionId))) {
+    const remaining = currentSession.renditions.filter((r) => r.id !== renditionId);
+    const newSelected = currentSession.selectedRenditionId === renditionId ? (remaining[0]?.id ?? null) : currentSession.selectedRenditionId;
+    const newSourceUrl = currentSession.selectedRenditionId === renditionId ? (remaining[0]?.url ?? null) : currentSession.sourceUrl;
+    updateWorkspaceSession({
+      renditions: remaining,
+      selectedRenditionId: newSelected,
+      sourceUrl: newSourceUrl,
+    });
+  }
+
+  // 3. Clear preview selection if it was pointing to this rendition
+  const preview = readPreviewSelection();
+  if (preview && (preview.mediaId === targetMediaId || preview.url.includes(renditionId))) {
+    clearPreviewSelection();
+  }
+
+  // 4. Send API request
+  try {
+    await deleteRendition(renditionId);
+    toast.success('Rendition deleted');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not delete rendition from server.';
+    toast.error('Failed to delete rendition', { description: message });
+    void syncLibraryFromApi();
+    throw error;
+  }
+}
+
+let isSyncingLibrary = false;
+
+export async function syncLibraryFromApi(): Promise<LibraryItem[]> {
+  if (!isBrowser() || !hasAuthToken()) return readLibraryItems();
+  if (isSyncingLibrary) return readLibraryItems();
+  isSyncingLibrary = true;
+
+  try {
+    const projects = await getProjects();
+    if (!projects || projects.length === 0) return readLibraryItems();
+
+    const mediaListByProject = await Promise.all(
+      projects.map((p) => listMedia(p.id).catch(() => [] as Media[]))
+    );
+    const allMedia = mediaListByProject.flat();
+    if (!allMedia || allMedia.length === 0) return readLibraryItems();
+
+    const syncedItems: LibraryItem[] = await Promise.all(
+      allMedia.map(async (m) => {
+        let renditions: LibraryRendition[] = [];
+        try {
+          const apiRenditions = await getRenditions(m.id);
+          renditions = apiRenditions.map(toLibraryRendition);
+        } catch {
+          // ignore error fetching renditions
+        }
+        const isVideo = m.mime_type ? m.mime_type.startsWith('video/') : true;
+        const status: 'processing' | 'ready' | 'failed' =
+          m.status === 'ready' ? 'ready' : m.status === 'failed' ? 'failed' : 'processing';
+
+        return {
+          id: m.id,
+          fileName: m.original_file_name,
+          kind: isVideo ? ('video' as const) : ('image' as const),
+          uploadedAt: (m as { created_at?: string }).created_at || new Date().toISOString(),
+          status,
+          renditions,
+        };
+      })
+    );
+
+    syncedItems.sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+
+    // Keep any local items that are in-flight and not yet in the backend list
+    const existing = readLibraryItems();
+    const inFlight = existing.filter(
+      (loc) => loc.status === 'processing' && !syncedItems.some((s) => s.id === loc.id)
+    );
+
+    const merged = [...inFlight, ...syncedItems];
+    writeLibraryItems(merged);
+    return merged;
+  } catch (err) {
+    console.error('Failed to sync library from API:', err);
+    return readLibraryItems();
+  } finally {
+    isSyncingLibrary = false;
+  }
 }
 
 export function clearLibrary() {
@@ -385,10 +499,14 @@ export function pollWorkspaceMedia(mediaId: string) {
     .catch((err) => {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       const message = err instanceof Error ? err.message : 'Processing failed';
-      updateLibraryItem(mediaId, { status: 'failed' });
-      updateWorkspaceSession({ status: 'failed', error: message });
+      const session = getWorkspaceSessionSnapshot();
+      const hasRenditions = session && session.renditions && session.renditions.length > 0;
+      if (!hasRenditions) {
+        updateLibraryItem(mediaId, { status: 'failed' });
+        updateWorkspaceSession({ status: 'failed', error: message });
+      }
       activePollController = null;
-      toast.error('Processing failed', { description: message });
+      toast.error('Processing status', { description: message });
     });
 }
 
