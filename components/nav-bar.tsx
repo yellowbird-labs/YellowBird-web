@@ -8,7 +8,7 @@ import { readTheme, subscribeTheme, writeTheme, type ThemeName } from '@/lib/the
 import { getSession, notifyAuthExpired } from '@/lib/auth/session';
 
 const GITHUB_URL = 'https://github.com/amaanworks';
-const DOCS_URL = 'https://api.amaanworks.me';
+const DOCS_URL = '/docs';
 
 function GitHubMark() {
   return (
@@ -139,7 +139,7 @@ export function NavBar() {
         <a className="yb-icon-btn yb-hide-sm" href={GITHUB_URL} target="_blank" rel="noreferrer" aria-label="GitHub repository" title="GitHub">
           <GitHubMark />
         </a>
-        <a className="yb-icon-btn yb-hide-sm" href={DOCS_URL} target="_blank" rel="noreferrer" aria-label="API documentation" title="Docs">
+        <a className="yb-icon-btn yb-hide-sm" href={DOCS_URL} aria-label="Docs" title="Docs">
           <BookOpen size={16} strokeWidth={1.8} aria-hidden />
         </a>
         <ThemeToggle />
